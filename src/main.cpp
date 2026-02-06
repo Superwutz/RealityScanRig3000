@@ -442,7 +442,7 @@ static float rotDeltaCw(float current, float target) {
 }
 static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 static float tiltAtIndex(int idx, int steps, float from, float to) {
-  if (steps <= 1) return from;
+  if (steps <= 1) return (from + to) * 0.5f;
   float t = (float)idx / (float)(steps - 1);
   return lerp(from, to, t);
 }
