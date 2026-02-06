@@ -417,6 +417,10 @@ static uint32_t gIdleNextPollMs = 0;
 static float gIdleLastAngle = 0.0f;
 static bool gIdleHaveAngle = false;
 
+static uint32_t gRotStepStartMs = 0;
+static float gRotStepMsAvg = 0.0f;
+static uint32_t gRotStepMsSamples = 0;
+
  
 
 static float angDistDeg(float a, float b) {
@@ -475,6 +479,10 @@ static void seqResetInternal() {
   gRepeatStep = false;
   gHasResumeAngle = false;
   gSeekAttempts = 0;
+
+  gRotStepStartMs = 0;
+  gRotStepMsAvg = 0.0f;
+  gRotStepMsSamples = 0;
 }
 
 static void seqStart() {
@@ -506,7 +514,11 @@ static void seqResume(){
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] RESUME\"}");
   }
 }
-static void seqAbort() { if (gSeqState != SEQ_IDLE)    { gSeqState = SEQ_IDLE; gSub = SUB_NONE; gResumePending = false; gResumeSub = SUB_NONE; gRecovering = false; gRecoverAttempts = 0; gRecoverStartMs = 0; gRecoverResendNextMs = 0; gNeedRecoverOnConnect = false; gRepeatStep = false; gHasResumeAngle = false; gSeekAttempts = 0; wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ABORT\"}"); } }
+static void seqAbort() {
+  if (gSeqState == SEQ_IDLE) return;
+  seqResetInternal();
+  wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ABORT\"}");
+}
 
 static void seqTick() {
   if (gSeqState != SEQ_RUNNING) return;
@@ -664,6 +676,7 @@ static void seqTick() {
       gAngleUpdated = false;
       gNextPollTs = now;
       gStateTs = now;
+      gRotStepStartMs = now;
 
       String cmd = String("+CT,TURNANGLE=") + String(gStepDeg, 1) + ";";
       bleWriteRaw(cmd);
@@ -698,7 +711,18 @@ static void seqTick() {
       if (gAngleUpdated) {
         gAngleUpdated = false;
         float dist = angDistDeg(gLastAngle, gRotTargetDeg);
-        if (dist <= gRotTolDeg) { gSub = SUB_SETTLE; gStateTs = now; gRecovering = false; gRecoverAttempts = 0; }
+        if (dist <= gRotTolDeg) {
+          if (!gRecovering && gRotStepStartMs != 0) {
+            uint32_t dur = now - gRotStepStartMs;
+            if (gRotStepMsSamples == 0) gRotStepMsAvg = (float)dur;
+            else gRotStepMsAvg = (gRotStepMsAvg * 0.8f) + ((float)dur * 0.2f);
+            gRotStepMsSamples++;
+          }
+          gSub = SUB_SETTLE;
+          gStateTs = now;
+          gRecovering = false;
+          gRecoverAttempts = 0;
+        }
       }
 
       uint32_t rotTimeout = gRotTimeoutMs + (gRecovering ? 12000 : 0);
@@ -784,6 +808,11 @@ static String buildRigStateJson() {
   j += "\"TILT_STEPS\":\"" + String(gTiltSteps) + "\",";
   j += "\"TILT_FROM\":\"" + String(gTiltFrom, 1) + "\",";
   j += "\"TILT_TO\":\"" + String(gTiltTo, 1) + "\",";
+  j += "\"TILT_MOVE_MS\":\"" + String(gTiltMoveMs) + "\",";
+  j += "\"TILT_RESERVE_MS\":\"" + String(gTiltReserveMs) + "\",";
+  j += "\"SNAP_SETTLE_MS\":\"" + String(gSnapSettleMs) + "\",";
+  j += "\"SNAP_COOLDOWN_MS\":\"" + String(gSnapCooldownMs) + "\",";
+  j += "\"ROT_STEP_MS_AVG\":\"" + String(gRotStepMsAvg, 1) + "\",";
   j += "\"ANGLE_LAST\":\"" + String(gLastAngle, 2) + "\",";
   j += "\"BLE\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"TT\":\"" + String(bleNow ? 1 : 0) + "\",";
