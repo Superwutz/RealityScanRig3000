@@ -12,4 +12,9 @@
 
 # Logs / misc
 *.log
+*.err
 .env
+
+# Local extracted UI assets (generated from src/web_assets.h)
+app.js
+style.css
