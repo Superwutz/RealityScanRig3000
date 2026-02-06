@@ -187,6 +187,19 @@ static void wsLog(const String& msg) {
   j = String("{\"type\":\"log\",\"msg\":\"") + j.substring(String("{\"type\":\"log\",\"msg\":").length()+1); // already escaped
   wsBroadcastJson(j);
 }
+static String jsonEscape(const String& s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '\\') out += "\\\\";
+    else if (c == '\"') out += "\\\"";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') {}
+    else out += c;
+  }
+  return out;
+}
 
 // ===== Turntable BLE =====
 static const char* TT_NAME = "REVO_DUAL_AXIS_TABLE";
@@ -196,12 +209,15 @@ static const NimBLEUUID TT_CHR_UUID((uint16_t)0xFFE1);
 static NimBLEClient* gClient = nullptr;
 static NimBLERemoteCharacteristic* gChr = nullptr;
 static bool gBleConnected = false;
+static volatile bool gBleDisconnectSeen = false;
 
 class TTClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*) override {
     gBleConnected = false;
     gChr = nullptr;
     Serial.println("[BLE] disconnected");
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[BLE] disconnected\"}");
+    gBleDisconnectSeen = true;
   }
 };
 static TTClientCallbacks gTtCbs;
@@ -217,8 +233,11 @@ static uint32_t gLastRxMs = 0;          // last time we saw any TT notification
 static uint32_t gLastHeartbeatMs = 0;   // last time we sent a heartbeat query
 static bool gHeartbeatPending = false;  // waiting for a response
 
+static float normAngle360(float a);
 
 static void onNotifyCB(NimBLERemoteCharacteristic*, uint8_t* pData, size_t len, bool) {
+  gLastRxMs = millis();
+  gHeartbeatPending = false;
   for (size_t i = 0; i < len; i++) {
     char c = (char)pData[i];
     if (c == '\r') continue;
@@ -235,7 +254,7 @@ static void onNotifyCB(NimBLERemoteCharacteristic*, uint8_t* pData, size_t len, 
             if ((ch >= '0' && ch <= '9') || ch == '-' || ch == '.') e++;
             else break;
           }
-          gLastAngle = gAsm.substring(p, e).toFloat();
+          gLastAngle = normAngle360(gAsm.substring(p, e).toFloat());
           gAngleUpdated = true;
         }
       }
@@ -335,13 +354,17 @@ static bool bleConnect() {
 
   gLastTTAddr = addr;
   gBleConnected = true;
+  gLastRxMs = millis();
+  gLastHeartbeatMs = 0;
+  gHeartbeatPending = false;
   Serial.println("[BLE] connected");
+  wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[BLE] connected\"}");
   return true;
 }
 
 // ===== Sequencer (same logic as v1) =====
 enum SeqState : uint8_t { SEQ_IDLE=0, SEQ_RUNNING, SEQ_PAUSED };
-enum SeqSub   : uint8_t { SUB_NONE=0, SUB_TILT_SEND, SUB_TILT_WAIT, SUB_ROT_SEND, SUB_ROT_WAIT, SUB_SNAP, SUB_COOLDOWN, SUB_DONE };
+enum SeqSub   : uint8_t { SUB_NONE=0, SUB_RECOVER, SUB_RECOVER_WAIT, SUB_ROT_SEEK_WAIT, SUB_TILT_SEND, SUB_TILT_WAIT, SUB_ROT_SEND, SUB_ROT_WAIT, SUB_SETTLE, SUB_SNAP, SUB_COOLDOWN, SUB_DONE };
 
 static SeqState gSeqState = SEQ_IDLE;
 static SeqSub   gSub = SUB_NONE;
@@ -355,6 +378,7 @@ static float gTiltTo    = +30.0f;
 static uint32_t gPollMs = 150;
 static uint32_t gRotTimeoutMs = 8000;
 static float    gRotTolDeg = 1.0f;
+static uint32_t gSnapSettleMs = 250;
 static uint32_t gSnapCooldownMs = 500;
 static uint32_t gTiltMoveMs = 5000;
 static uint32_t gTiltReserveMs = 0;
@@ -365,21 +389,52 @@ static float gStepDeg = 5.0f;
 
 static float gCurTiltTarget = 0.0f;
 static float gRotTargetDeg  = 0.0f;
+static float gRotRowZeroDeg = 0.0f;
 static uint32_t gStateTs = 0;
 static uint32_t gNextPollTs = 0;
 
 static uint32_t gTotalSteps = 72 * 9;
 static uint32_t gDoneSteps = 0;
 
+static bool gResumePending = false;
+static SeqSub gResumeSub = SUB_NONE;
+
+static float gRecoverLastAngle = 0.0f;
+static uint32_t gRecoverStableSince = 0;
+static bool gRecovering = false;
+static uint8_t gRecoverAttempts = 0;
+static uint32_t gRecoverStartMs = 0;
+static uint32_t gRecoverResendNextMs = 0;
+static bool gNeedRecoverOnConnect = false;
+static uint32_t gForceDiscNextMs = 0;
+static bool gRepeatStep = false;
+static bool gHasResumeAngle = false;
+static float gResumeAngle = 0.0f;
+static uint8_t gSeekAttempts = 0;
+
+static uint32_t gIdleMonitorUntilMs = 0;
+static uint32_t gIdleNextPollMs = 0;
+static float gIdleLastAngle = 0.0f;
+static bool gIdleHaveAngle = false;
+
+ 
+
 static float angDistDeg(float a, float b) {
   float d = fabsf(a - b);
   if (d > 180.0f) d = 360.0f - d;
   return d;
 }
-static float normAngleDeg(float a) {
-  while (a > 180.0f) a -= 360.0f;
-  while (a < -180.0f) a += 360.0f;
+static float normAngle360(float a) {
+  while (a < 0.0f) a += 360.0f;
+  while (a >= 360.0f) a -= 360.0f;
   return a;
+}
+static float rotDeltaCw(float current, float target) {
+  float c = normAngle360(current);
+  float t = normAngle360(target);
+  float d = t - c;
+  if (d < 0.0f) d += 360.0f;
+  return d;
 }
 static float lerp(float a, float b, float t) { return a + (b - a) * t; }
 static float tiltAtIndex(int idx, int steps, float from, float to) {
@@ -406,9 +461,20 @@ static void seqResetInternal() {
 
   gCurTiltTarget = tiltAtIndex(0, gTiltSteps, gTiltFrom, gTiltTo);
   gRotTargetDeg = 0.0f;
+  gRotRowZeroDeg = 0.0f;
 
   gStateTs = millis();
   gNextPollTs = 0;
+  gResumePending = false;
+  gResumeSub = SUB_NONE;
+  gRecovering = false;
+  gRecoverAttempts = 0;
+  gRecoverStartMs = 0;
+  gRecoverResendNextMs = 0;
+  gNeedRecoverOnConnect = false;
+  gRepeatStep = false;
+  gHasResumeAngle = false;
+  gSeekAttempts = 0;
 }
 
 static void seqStart() {
@@ -416,23 +482,169 @@ static void seqStart() {
   seqResetInternal();
   gSeqState = SEQ_RUNNING;
   gSub = SUB_TILT_SEND;
+  gResumePending = false;
+  gResumeSub = SUB_NONE;
+  gRecovering = false;
+  gRecoverAttempts = 0;
+  gRecoverStartMs = 0;
+  gRecoverResendNextMs = 0;
+  gNeedRecoverOnConnect = false;
+  gRepeatStep = false;
+  gHasResumeAngle = false;
+  gSeekAttempts = 0;
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] START\"}");
 }
 static void seqPause() { if (gSeqState == SEQ_RUNNING) { gSeqState = SEQ_PAUSED; wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] PAUSE\"}"); } }
-static void seqResume(){ if (gSeqState == SEQ_PAUSED)  { gSeqState = SEQ_RUNNING; wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] RESUME\"}"); } }
-static void seqAbort() { if (gSeqState != SEQ_IDLE)    { gSeqState = SEQ_IDLE; gSub = SUB_NONE; wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ABORT\"}"); } }
+static void seqResume(){
+  if (gSeqState == SEQ_PAUSED)  {
+    gSeqState = SEQ_RUNNING;
+    if (gResumePending) {
+      gSub = gResumeSub;
+      gResumePending = false;
+      gResumeSub = SUB_NONE;
+    }
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] RESUME\"}");
+  }
+}
+static void seqAbort() { if (gSeqState != SEQ_IDLE)    { gSeqState = SEQ_IDLE; gSub = SUB_NONE; gResumePending = false; gResumeSub = SUB_NONE; gRecovering = false; gRecoverAttempts = 0; gRecoverStartMs = 0; gRecoverResendNextMs = 0; gNeedRecoverOnConnect = false; gRepeatStep = false; gHasResumeAngle = false; gSeekAttempts = 0; wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ABORT\"}"); } }
 
 static void seqTick() {
   if (gSeqState != SEQ_RUNNING) return;
-  if (!gBleConnected) { seqAbort(); return; }
+  if (!gBleConnected) {
+    gSeqState = SEQ_PAUSED;
+    gResumePending = true;
+    gResumeSub = SUB_RECOVER;
+    gRecoverStartMs = millis();
+    gHasResumeAngle = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
+    return;
+  }
 
   uint32_t now = millis();
 
   switch (gSub) {
+    case SUB_RECOVER: {
+      // Stop any ongoing motion after power loss / reconnect
+      bleWriteRaw("+CT,STOP;");
+      bleWriteRaw("+CR,STOP;");
+      gCurTiltTarget = tiltAtIndex(gTiltIdx, gTiltSteps, gTiltFrom, gTiltTo);
+      String cmd = String("+CR,TILTVALUE=") + String(gCurTiltTarget, 1) + ";";
+      bleWriteRaw(cmd);
+      {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "[SEQ] RECOVER tilt %d/%d -> target=%.1f deg",
+                 gTiltIdx + 1, gTiltSteps, gCurTiltTarget);
+        String j = String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}";
+        wsBroadcastJson(j);
+      }
+      gStateTs = now;
+      gNextPollTs = now;
+      gAngleUpdated = false;
+      gRecoverLastAngle = gLastAngle;
+      gRecoverStableSince = 0;
+      gRecovering = true;
+      if (gRecoverStartMs == 0) gRecoverStartMs = now;
+      if (gRecoverAttempts < 255) gRecoverAttempts++;
+      gRecoverResendNextMs = now + 1000;
+      gSub = SUB_RECOVER_WAIT;
+    } break;
+
+    case SUB_RECOVER_WAIT: {
+      uint32_t waitMs = gTiltMoveMs + gTiltReserveMs;
+      // If we are not receiving any angle updates, force a reconnect and retry recovery
+      if ((now - gLastRxMs) > 3000) {
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] RECOVER no RX -> BLE reconnect\"}");
+        bleDisconnect();
+        gSeqState = SEQ_PAUSED;
+        gResumePending = true;
+        gResumeSub = SUB_RECOVER;
+        return;
+      }
+      // Re-issue STOP and TILT periodically during recovery
+      if ((int32_t)(now - gRecoverResendNextMs) >= 0) {
+        bleWriteRaw("+CT,STOP;");
+        bleWriteRaw("+CR,STOP;");
+        String cmd = String("+CR,TILTVALUE=") + String(gCurTiltTarget, 1) + ";";
+        bleWriteRaw(cmd);
+        gRecoverResendNextMs = now + 1000;
+      }
+      if ((int32_t)(now - gNextPollTs) >= 0) {
+        bleWriteRaw("+QT,CHANGEANGLE;");
+        gNextPollTs = now + gPollMs;
+      }
+      if (gAngleUpdated) {
+        gAngleUpdated = false;
+        float dist = angDistDeg(gLastAngle, gRecoverLastAngle);
+        gRecoverLastAngle = gLastAngle;
+        if (dist <= gRotTolDeg) {
+          if (gRecoverStableSince == 0) gRecoverStableSince = now;
+        } else {
+          gRecoverStableSince = 0;
+          // still moving -> re-issue stop to suppress auto-rotate
+          bleWriteRaw("+CT,STOP;");
+          bleWriteRaw("+CR,STOP;");
+        }
+      }
+      bool tiltDone = (now - gStateTs >= waitMs);
+      bool stable = (gRecoverStableSince != 0) && (now - gRecoverStableSince >= (2 * gPollMs));
+      if (tiltDone && (stable || (now - gStateTs > (waitMs + 8000)))) {
+        if (gRepeatStep) {
+          if (gRotIdx > 0) gRotIdx--;
+          if (gDoneSteps > 0) gDoneSteps--;
+          gRepeatStep = false;
+        }
+        gHasResumeAngle = false;
+        gSeekAttempts = 0;
+        gSub = SUB_ROT_SEND;
+      }
+    } break;
+
+    case SUB_ROT_SEEK_WAIT: {
+      if ((int32_t)(now - gNextPollTs) >= 0) {
+        bleWriteRaw("+QT,CHANGEANGLE;");
+        gNextPollTs = now + gPollMs;
+      }
+      if ((now - gLastRxMs) > 3000) {
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] SEEK no RX -> BLE reconnect\"}");
+        bleDisconnect();
+        gSeqState = SEQ_PAUSED;
+        gResumePending = true;
+        gResumeSub = SUB_RECOVER;
+        return;
+      }
+      if (gAngleUpdated) {
+        gAngleUpdated = false;
+        float dist = angDistDeg(gLastAngle, gRotTargetDeg);
+        if (dist <= gRotTolDeg) {
+          gSub = SUB_ROT_SEND;
+        }
+      }
+      if (now - gStateTs > (gRotTimeoutMs + 8000)) {
+        if (gSeekAttempts >= 2) {
+          wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] SEEK TIMEOUT -> SKIP SEEK\"}");
+          gSeekAttempts = 0;
+          gSub = SUB_ROT_SEND;
+        } else {
+          wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] SEEK TIMEOUT -> RECOVER\"}");
+          gSub = SUB_RECOVER;
+        }
+        gHasResumeAngle = false;
+      }
+    } break;
+
     case SUB_TILT_SEND: {
       gCurTiltTarget = tiltAtIndex(gTiltIdx, gTiltSteps, gTiltFrom, gTiltTo);
       String cmd = String("+CR,TILTVALUE=") + String(gCurTiltTarget, 1) + ";";
       bleWriteRaw(cmd);
+      {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "[SEQ] TILT step %d/%d -> target=%.1f deg",
+                 gTiltIdx + 1, gTiltSteps, gCurTiltTarget);
+        String j = String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}";
+        wsBroadcastJson(j);
+      }
       gStateTs = now;
       gSub = SUB_TILT_WAIT;
     } break;
@@ -447,7 +659,7 @@ static void seqTick() {
 
     case SUB_ROT_SEND: {
       float start = gLastAngle;
-      gRotTargetDeg = normAngleDeg(start + gStepDeg);
+      gRotTargetDeg = normAngle360(start + gStepDeg);
 
       gAngleUpdated = false;
       gNextPollTs = now;
@@ -455,6 +667,15 @@ static void seqTick() {
 
       String cmd = String("+CT,TURNANGLE=") + String(gStepDeg, 1) + ";";
       bleWriteRaw(cmd);
+      {
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "[SEQ] ROT step %d/%d (tilt %d/%d) -> target=%.2f deg (start=%.2f, step=%.2f)",
+                 gRotIdx + 1, gRotSteps, gTiltIdx + 1, gTiltSteps,
+                 gRotTargetDeg, start, gStepDeg);
+        String j = String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}";
+        wsBroadcastJson(j);
+      }
 
       gSub = SUB_ROT_WAIT;
     } break;
@@ -464,16 +685,46 @@ static void seqTick() {
         bleWriteRaw("+QT,CHANGEANGLE;");
         gNextPollTs = now + gPollMs;
       }
+      // If we are not receiving any angle updates, force a reconnect and retry recovery
+      if ((now - gLastRxMs) > 3000) {
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ROT no RX -> BLE reconnect\"}");
+        bleDisconnect();
+        gSeqState = SEQ_PAUSED;
+        gResumePending = true;
+        gResumeSub = SUB_RECOVER;
+        return;
+      }
 
       if (gAngleUpdated) {
         gAngleUpdated = false;
         float dist = angDistDeg(gLastAngle, gRotTargetDeg);
-        if (dist <= gRotTolDeg) gSub = SUB_SNAP;
+        if (dist <= gRotTolDeg) { gSub = SUB_SETTLE; gStateTs = now; gRecovering = false; gRecoverAttempts = 0; }
       }
 
-      if (now - gStateTs > gRotTimeoutMs) {
-        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ROT TIMEOUT -> ABORT\"}");
-        seqAbort();
+      uint32_t rotTimeout = gRotTimeoutMs + (gRecovering ? 12000 : 0);
+      if (now - gStateTs > rotTimeout) {
+        bool recoverWindowOk = (gRecoverStartMs == 0) || (now - gRecoverStartMs < 120000);
+        if (gRecovering && recoverWindowOk) {
+          wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ROT TIMEOUT -> RECOVER\"}");
+          gSub = SUB_RECOVER;
+          gStateTs = now;
+          gNextPollTs = now;
+          gAngleUpdated = false;
+        } else {
+          char buf[128];
+          snprintf(buf, sizeof(buf),
+                   "[SEQ] ROT TIMEOUT -> ABORT (angle=%.2f target=%.2f age=%lu ms)",
+                   gLastAngle, gRotTargetDeg, (unsigned long)(now - gLastRxMs));
+          String j = String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}";
+          wsBroadcastJson(j);
+          seqAbort();
+        }
+      }
+    } break;
+
+    case SUB_SETTLE: {
+      if (now - gStateTs >= gSnapSettleMs) {
+        gSub = SUB_SNAP;
       }
     } break;
 
@@ -515,24 +766,9 @@ static void seqTick() {
 }
 
 // ===== Rig state JSON builder =====
-static String jsonEscape(const String& s) {
-  String out;
-  out.reserve(s.length() + 8);
-  for (size_t i = 0; i < s.length(); i++) {
-    char c = s[i];
-    if (c == '\\') out += "\\\\";
-    else if (c == '\"') out += "\\\"";
-    else if (c == '\n') out += "\\n";
-    else if (c == '\r') {}
-    else out += c;
-  }
-  return out;
-}
-
 static String buildRigStateJson() {
   String state = (gSeqState == SEQ_IDLE) ? "IDLE" : (gSeqState == SEQ_RUNNING ? "RUNNING" : "PAUSED");
-  bool bleNow = (gClient && gClient->isConnected());
-  gBleConnected = bleNow;
+  bool bleNow = gBleConnected;
 
 
   // STEP formatted as "cur/total"
@@ -592,6 +828,8 @@ static void setKeyVal(const String& key, const String& val) {
     gRotTolDeg = val.toFloat();
   } else if (key == "TILT_MOVE_MS") {
     gTiltMoveMs = (uint32_t)val.toInt();
+  } else if (key == "SNAP_SETTLE_MS") {
+    gSnapSettleMs = (uint32_t)val.toInt();
   } else if (key == "SNAP_COOLDOWN_MS") {
     gSnapCooldownMs = (uint32_t)val.toInt();
   } else if (key == "WIFI_SSID") {
@@ -943,10 +1181,124 @@ void loop() {
   static bool lastBle = false;
   bleAutoConnectTick();
   bleHeartbeatTick();
-  if (lastBle != gBleConnected) { lastBle = gBleConnected; wsSendStatus(); }
+
+  // If we are running but not receiving BLE updates, force a disconnect to trigger recovery
+  if (gSeqState == SEQ_RUNNING && gBleConnected) {
+    uint32_t nowDisc = millis();
+    if ((nowDisc - gLastRxMs) > 2500 && (int32_t)(nowDisc - gForceDiscNextMs) >= 0) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] no RX -> force BLE reconnect\"}");
+      bleDisconnect();
+      gBleDisconnectSeen = true;
+      gForceDiscNextMs = nowDisc + 2000;
+    }
+  }
+
+  if (gBleDisconnectSeen) {
+    gBleDisconnectSeen = false;
+    if (gSeqState == SEQ_RUNNING) {
+      gSeqState = SEQ_PAUSED;
+      gResumePending = true;
+      gResumeSub = SUB_RECOVER;
+      gRecovering = true;
+      gRecoverAttempts = 0;
+      gRecoverStartMs = millis();
+      gRecoverResendNextMs = 0;
+      gNeedRecoverOnConnect = true;
+      gRepeatStep = true;
+      gHasResumeAngle = false;
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
+    }
+  }
+
+  if (lastBle != gBleConnected) {
+    lastBle = gBleConnected;
+    wsSendStatus();
+    if (!gBleConnected) {
+      if (gSeqState == SEQ_RUNNING) {
+        gSeqState = SEQ_PAUSED;
+        gResumePending = true;
+        gResumeSub = SUB_RECOVER;
+        gRecovering = true;
+        gRecoverAttempts = 0;
+        gRecoverStartMs = millis();
+        gRecoverResendNextMs = 0;
+        gNeedRecoverOnConnect = true;
+        gHasResumeAngle = false;
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
+      }
+    } else {
+      // Always stop motion on reconnect (safe idle)
+      bleWriteRaw("+CT,STOP;");
+      bleWriteRaw("+CR,STOP;");
+      // Start idle monitoring window if no sequence is running
+      if (gSeqState == SEQ_IDLE) {
+        gIdleMonitorUntilMs = millis() + 10000;
+        gIdleNextPollMs = 0;
+        gIdleHaveAngle = false;
+      }
+      if (gNeedRecoverOnConnect && gSeqState != SEQ_IDLE) {
+        gSeqState = SEQ_RUNNING;
+        gSub = SUB_RECOVER;
+        gResumePending = false;
+        gResumeSub = SUB_NONE;
+        gRecovering = true;
+        gRecoverAttempts = 0;
+        gRecoverStartMs = millis();
+        gRecoverResendNextMs = 0;
+        gStateTs = millis();
+        gNextPollTs = 0;
+        gAngleUpdated = false;
+        gNeedRecoverOnConnect = false;
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE reconnected -> RECOVER\"}");
+      }
+    }
+  }
+
+  // Safety: if we missed the edge but need recover and BLE is up, start recovery
+  if (gNeedRecoverOnConnect && gBleConnected && gSeqState != SEQ_IDLE) {
+    gSeqState = SEQ_RUNNING;
+    gSub = SUB_RECOVER;
+    gResumePending = false;
+    gResumeSub = SUB_NONE;
+    gRecovering = true;
+    gRecoverAttempts = 0;
+    gRecoverStartMs = millis();
+    gRecoverResendNextMs = 0;
+    gStateTs = millis();
+    gNextPollTs = 0;
+    gAngleUpdated = false;
+    gNeedRecoverOnConnect = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE reconnected -> RECOVER\"}");
+  }
 
   // sequencer
   seqTick();
+
+  // idle monitor after reconnect: stop auto-rotate if it starts
+  if (gSeqState == SEQ_IDLE && gBleConnected && gIdleMonitorUntilMs) {
+    uint32_t nowIdle = millis();
+    if ((int32_t)(nowIdle - gIdleMonitorUntilMs) >= 0) {
+      gIdleMonitorUntilMs = 0;
+    } else if ((int32_t)(nowIdle - gIdleNextPollMs) >= 0) {
+      bleWriteRaw("+QT,CHANGEANGLE;");
+      gIdleNextPollMs = nowIdle + 300;
+    }
+
+    if (gAngleUpdated) {
+      gAngleUpdated = false;
+      if (!gIdleHaveAngle) {
+        gIdleHaveAngle = true;
+        gIdleLastAngle = gLastAngle;
+      } else {
+        float dist = angDistDeg(gLastAngle, gIdleLastAngle);
+        gIdleLastAngle = gLastAngle;
+        if (dist > gRotTolDeg) {
+          bleWriteRaw("+CT,STOP;");
+          bleWriteRaw("+CR,STOP;");
+        }
+      }
+    }
+  }
 
   // periodically push status (lightweight)
   static uint32_t nextStatus = 0;
