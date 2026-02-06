@@ -1,0 +1,15 @@
+# PlatformIO
+.pio/
+
+# VS Code
+.vscode/
+
+# Build artifacts
+*.bin
+*.elf
+*.map
+*.zip
+
+# Logs / misc
+*.log
+.env
