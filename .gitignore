@@ -19,3 +19,6 @@
 app.js
 style.css
 index.html
+
+# Local secrets (do not commit)
+src/secrets.local.h

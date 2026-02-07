@@ -28,3 +28,10 @@ Erwartete Ausgabe
 === RealityScanRig3000 | ESP32-S3 Console-Only Bringup ===
 ... und dann jede Sekunde:
 [1000 ms] tick=1 | free_heap=...
+
+Secrets-Workflow (WLAN/IP)
+--------------------------
+1) `src/secrets.example.h` nach `src/secrets.local.h` kopieren
+2) echte SSID/Passwort/IP in `src/secrets.local.h` eintragen
+3) `src/secrets.local.h` bleibt lokal (ist in `.gitignore`)
+4) ohne lokale Datei werden Platzhalter aus `src/secrets.example.h` genutzt

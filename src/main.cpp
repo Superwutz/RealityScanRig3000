@@ -10,6 +10,11 @@
 #include <ESPAsyncWebServer.h>
 
 #include "web_assets.h"
+#if __has_include("secrets.local.h")
+#include "secrets.local.h"
+#else
+#include "secrets.example.h"
+#endif
 
 /*
 RealityScanRig3000 – ESP32-S3: UI (WebSocket) + BLE Turntable + Sequencer (v1)
@@ -38,7 +43,7 @@ Protocol from UI:
 */
 
 // ===== WiFi config (stored in NVS) =====
-static const char* MDNS_NAME = "scanrig"; // -> scanrig.local
+static const char* MDNS_NAME = SCANRIG_MDNS_NAME; // -> <name>.local
 static const uint16_t HTTP_PORT = 80;
 
 Preferences prefs;
@@ -46,21 +51,21 @@ static String wifiSsid;
 static String wifiPass;
 
 // AP fallback
-static const char* AP_SSID = "RealityScanRig3000";
-static const char* AP_PASS = "scanrig3000";
+static const char* AP_SSID = SCANRIG_AP_SSID;
+static const char* AP_PASS = SCANRIG_AP_PASS;
 
 // ===== Firm profile (project memory) =====
 // NOTE: You can overwrite these via Serial commands (stored in NVS).
-static const char* FIRM_SSID = "[REDACTED_SSID]";
-static const char* FIRM_PASS = "[REDACTED_PASSWORD]";
+static const char* FIRM_SSID = SCANRIG_FIRM_SSID;
+static const char* FIRM_PASS = SCANRIG_FIRM_PASS;
 
 // Static IP profile (temporary in company network)
-static const char* FIRM_IP   = "[REDACTED_IP]";
-static const char* FIRM_GW   = "[REDACTED_IP]";
-static const char* FIRM_DNS  = "[REDACTED_IP]";
-static const char* FIRM_MASK = "255.255.255.0";
+static const char* FIRM_IP   = SCANRIG_FIRM_IP;
+static const char* FIRM_GW   = SCANRIG_FIRM_GW;
+static const char* FIRM_DNS  = SCANRIG_FIRM_DNS;
+static const char* FIRM_MASK = SCANRIG_FIRM_MASK;
 
-static bool   wifiUseStatic = false;
+static bool   wifiUseStatic = (SCANRIG_FIRM_USE_STATIC != 0);
 static String wifiIpStr, wifiGwStr, wifiDnsStr, wifiMaskStr;
 
 static bool parseIP(const String& s, IPAddress& out) {
@@ -116,7 +121,7 @@ static void wifiStart() {
     wifiMaskStr = FIRM_MASK;
     saveWifiCreds(wifiSsid, wifiPass);
     saveWifiStatic(wifiUseStatic, wifiIpStr, wifiGwStr, wifiDnsStr, wifiMaskStr);
-    Serial.println("[WIFI] no saved creds -> defaulting to FIRM profile ([REDACTED_SSID] + static IP)");
+    Serial.println("[WIFI] no saved creds -> defaulting to FIRM profile from secrets");
   }
 
   WiFi.mode(WIFI_STA);
