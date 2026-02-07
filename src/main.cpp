@@ -421,8 +421,39 @@ static uint32_t gRotStepStartMs = 0;
 static float gRotStepMsAvg = 0.0f;
 static uint32_t gRotStepMsSamples = 0;
 
- 
+/*
+Turntable control reference (vendor template):
+  +"COMMAND","ACTION"="VALUE";
+Rules: ALL CAPS, no spaces, starts with '+', ends with ';'
 
+Tilt:
+  +CR,TILTVALUE=10;
+  +CR,TILTSPEED=10;
+  +CR,TOZERO;
+  +CR,STOP;
+  +QR,TILTANGLE;
+  +QR,TILTSPEED;
+
+Rotate:
+  +CT,TURNANGLE=360;   // incremental, supports +/- values
+  +CT,TURNSPEED=36;
+  +CT,TOZERO;
+  +CT,STOP;
+  +QT,CHANGEANGLE;
+  +QT,TURNSPEED;
+*/
+static float gManualTurnPulseDeg = 12.0f;
+static uint32_t gManualTurnPulseMs = 180;
+static int8_t gManualTurnDir = 0; // -1 left, +1 right, 0 stop
+static uint32_t gManualTurnNextMs = 0;
+static float gManualTiltStepDeg = 2.0f;
+static uint32_t gManualTiltPulseMs = 180;
+static int8_t gManualTiltDir = 0; // -1 down, +1 up, 0 stop
+static float gManualTiltTarget = 0.0f;
+static uint32_t gManualTiltNextMs = 0;
+
+ 
+ 
 static float angDistDeg(float a, float b) {
   float d = fabsf(a - b);
   if (d > 180.0f) d = 360.0f - d;
@@ -483,6 +514,11 @@ static void seqResetInternal() {
   gRotStepStartMs = 0;
   gRotStepMsAvg = 0.0f;
   gRotStepMsSamples = 0;
+  gManualTurnDir = 0;
+  gManualTurnNextMs = 0;
+  gManualTiltDir = 0;
+  gManualTiltNextMs = 0;
+  gManualTiltTarget = gCurTiltTarget;
 }
 
 static void seqStart() {
@@ -518,6 +554,135 @@ static void seqAbort() {
   if (gSeqState == SEQ_IDLE) return;
   seqResetInternal();
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ABORT\"}");
+}
+
+static bool manualTurnStart(int8_t dir, const char* dirLabel) {
+  if (!gBleConnected) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual move ignored (BLE disconnected)\"}");
+    return false;
+  }
+  if (gSeqState == SEQ_RUNNING) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual move ignored (sequence running)\"}");
+    return false;
+  }
+  gManualTurnDir = (dir < 0) ? -1 : 1;
+  gManualTurnNextMs = 0;
+  bool ok = true;
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[TT] manual ")
+                  + dirLabel + " START\"}");
+  return ok;
+}
+
+static bool manualTurnStop() {
+  if (!gBleConnected) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual stop ignored (BLE disconnected)\"}");
+    return false;
+  }
+  gManualTurnDir = 0;
+  gManualTurnNextMs = 0;
+  gManualTiltDir = 0;
+  gManualTiltNextMs = 0;
+  bool ok1 = bleWriteRaw("+CT,STOP;");
+  bool ok2 = bleWriteRaw("+CR,STOP;");
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[TT] manual stop ")
+                  + ((ok1 && ok2) ? "OK" : "FAIL") + "\"}");
+  return ok1 && ok2;
+}
+
+static bool manualRotToZero() {
+  if (!gBleConnected) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] rot zero ignored (BLE disconnected)\"}");
+    return false;
+  }
+  if (gSeqState == SEQ_RUNNING) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] rot zero ignored (sequence running)\"}");
+    return false;
+  }
+  gManualTurnDir = 0;
+  gManualTurnNextMs = 0;
+  bool ok = bleWriteRaw("+CT,TOZERO;");
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[TT] rot zero ")
+                  + (ok ? "OK" : "FAIL") + "\"}");
+  return ok;
+}
+
+static bool manualTiltToZero() {
+  if (!gBleConnected) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] tilt zero ignored (BLE disconnected)\"}");
+    return false;
+  }
+  if (gSeqState == SEQ_RUNNING) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] tilt zero ignored (sequence running)\"}");
+    return false;
+  }
+  gManualTiltDir = 0;
+  gManualTiltNextMs = 0;
+  bool ok = bleWriteRaw("+CR,TOZERO;");
+  if (ok) gCurTiltTarget = 0.0f;
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[TT] tilt zero ")
+                  + (ok ? "OK" : "FAIL") + "\"}");
+  return ok;
+}
+
+static void manualTurnTick() {
+  if (gManualTurnDir == 0) return;
+  if (!gBleConnected) { gManualTurnDir = 0; return; }
+  if (gSeqState == SEQ_RUNNING) return;
+
+  uint32_t now = millis();
+  if ((int32_t)(now - gManualTurnNextMs) < 0) return;
+
+  float delta = (gManualTurnDir < 0 ? -gManualTurnPulseDeg : gManualTurnPulseDeg);
+  String cmd = String("+CT,TURNANGLE=") + String(delta, 1) + ";";
+  bool ok = bleWriteRaw(cmd);
+  if (!ok) {
+    gManualTurnDir = 0;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual pulse FAIL -> stop\"}");
+    return;
+  }
+  gManualTurnNextMs = now + gManualTurnPulseMs;
+}
+
+static bool manualTiltStart(int8_t dir, const char* dirLabel) {
+  if (!gBleConnected) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual tilt ignored (BLE disconnected)\"}");
+    return false;
+  }
+  if (gSeqState == SEQ_RUNNING) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual tilt ignored (sequence running)\"}");
+    return false;
+  }
+  gManualTiltDir = (dir < 0) ? -1 : 1;
+  gManualTiltNextMs = 0;
+  gManualTiltTarget = gCurTiltTarget;
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[TT] manual tilt ")
+                  + dirLabel + " START\"}");
+  return true;
+}
+
+static void manualTiltTick() {
+  if (gManualTiltDir == 0) return;
+  if (!gBleConnected) { gManualTiltDir = 0; return; }
+  if (gSeqState == SEQ_RUNNING) return;
+
+  uint32_t now = millis();
+  if ((int32_t)(now - gManualTiltNextMs) < 0) return;
+
+  float minTilt = (gTiltFrom < gTiltTo) ? gTiltFrom : gTiltTo;
+  float maxTilt = (gTiltFrom < gTiltTo) ? gTiltTo : gTiltFrom;
+  gManualTiltTarget += (gManualTiltDir < 0 ? -gManualTiltStepDeg : gManualTiltStepDeg);
+  if (gManualTiltTarget < minTilt) gManualTiltTarget = minTilt;
+  if (gManualTiltTarget > maxTilt) gManualTiltTarget = maxTilt;
+
+  String cmd = String("+CR,TILTVALUE=") + String(gManualTiltTarget, 1) + ";";
+  bool ok = bleWriteRaw(cmd);
+  if (!ok) {
+    gManualTiltDir = 0;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual tilt pulse FAIL -> stop\"}");
+    return;
+  }
+  gCurTiltTarget = gManualTiltTarget;
+  gManualTiltNextMs = now + gManualTiltPulseMs;
 }
 
 static void seqTick() {
@@ -882,6 +1047,13 @@ static void handleLine(const String& lineIn) {
   if (line == "RESUME") { seqResume(); wsSendStatus(); return; }
   if (line == "ABORT")  { seqAbort(); wsSendStatus(); return; }
   if (line == "RESET")  { seqResetInternal(); wsSendStatus(); return; }
+  if (line == "TT_LEFT")  { manualTurnStart(-1, "left"); wsSendStatus(); return; }
+  if (line == "TT_RIGHT") { manualTurnStart(+1, "right"); wsSendStatus(); return; }
+  if (line == "TT_ROT_ZERO") { manualRotToZero(); wsSendStatus(); return; }
+  if (line == "TT_TILT_UP") { manualTiltStart(+1, "up"); wsSendStatus(); return; }
+  if (line == "TT_TILT_DOWN") { manualTiltStart(-1, "down"); wsSendStatus(); return; }
+  if (line == "TT_TILT_ZERO") { manualTiltToZero(); wsSendStatus(); return; }
+  if (line == "TT_STOP" || line == "TT_PAUSE") { manualTurnStop(); wsSendStatus(); return; }
 
   // BLE control
   if (line == "BLE_CONNECT") { bool ok = bleConnect(); wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[BLE] connect ") + (ok ? "OK" : "FAIL") + "\"}"); wsSendStatus(); return; }
@@ -998,6 +1170,7 @@ static void printHelpSerial() {
   Serial.println("  BLE_CONNECT            (connect to turntable)");
   Serial.println("  BLE_DISCONNECT");
   Serial.println("  STATUS | START | PAUSE | RESUME | ABORT | RESET");
+  Serial.println("  TT_LEFT | TT_RIGHT | TT_ROT_ZERO | TT_TILT_UP | TT_TILT_DOWN | TT_TILT_ZERO | TT_STOP");
   Serial.println("  SET KEY=VAL            e.g. SET ROT_STEPS=72");
   Serial.println("  RAW <raw>              e.g. RAW +QT,CHANGEANGLE;");
   Serial.println();
@@ -1302,6 +1475,8 @@ void loop() {
 
   // sequencer
   seqTick();
+  manualTurnTick();
+  manualTiltTick();
 
   // idle monitor after reconnect: stop auto-rotate if it starts
   if (gSeqState == SEQ_IDLE && gBleConnected && gIdleMonitorUntilMs) {
