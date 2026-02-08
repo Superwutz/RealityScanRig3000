@@ -3,6 +3,7 @@
 
 # VS Code
 .vscode/
+*.code-workspace
 
 # Build artifacts
 *.bin
@@ -19,6 +20,7 @@
 app.js
 style.css
 index.html
+.tmp_ui/
 
 # Local secrets (do not commit)
 src/secrets.local.h
