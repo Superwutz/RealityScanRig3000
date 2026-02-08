@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
+#include <Update.h>
 
 #include <NimBLEDevice.h>
 
@@ -204,6 +205,9 @@ static NimBLEClient* gClient = nullptr;
 static NimBLERemoteCharacteristic* gChr = nullptr;
 static bool gBleConnected = false;
 static volatile bool gBleDisconnectSeen = false;
+static bool gFwUpdateInProgress = false;
+static bool gFwUpdateOk = false;
+static String gFwUpdateError = "";
 
 class TTClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*) override {
@@ -1379,6 +1383,59 @@ void setup() {
   server.on("/app.js", HTTP_GET, [](AsyncWebServerRequest* req) {
     req->send(200, "application/javascript; charset=utf-8", APP_JS, APP_JS_LEN);
   });
+  server.on("/api/update", HTTP_POST,
+    [](AsyncWebServerRequest* req) {
+      bool ok = gFwUpdateOk && !Update.hasError();
+      int code = ok ? 200 : 500;
+      String body = ok
+        ? String("{\"ok\":true,\"msg\":\"update successful; rebooting\"}")
+        : String("{\"ok\":false,\"msg\":\"") + jsonEscape(gFwUpdateError.length() ? gFwUpdateError : String("update failed")) + "\"}";
+      req->send(code, "application/json; charset=utf-8", body);
+
+      gFwUpdateInProgress = false;
+      if (ok) {
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[FW] update successful -> reboot\"}");
+        delay(200);
+        ESP.restart();
+      }
+    },
+    [](AsyncWebServerRequest* req, String filename, size_t index, uint8_t* data, size_t len, bool final) {
+      (void)req;
+      if (index == 0) {
+        gFwUpdateInProgress = true;
+        gFwUpdateOk = false;
+        gFwUpdateError = "";
+        if (gSeqState == SEQ_RUNNING) {
+          gFwUpdateError = "cannot update while sequence is running";
+          return;
+        }
+        if (!filename.length()) filename = "firmware.bin";
+        wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[FW] update upload start: ")
+                        + jsonEscape(filename) + "\"}");
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+          gFwUpdateError = "Update.begin failed";
+          Update.printError(Serial);
+          return;
+        }
+      }
+
+      if (gFwUpdateError.length()) return;
+      if (len && (Update.write(data, len) != len)) {
+        gFwUpdateError = "Update.write failed";
+        Update.printError(Serial);
+        return;
+      }
+
+      if (final) {
+        if (!Update.end(true)) {
+          gFwUpdateError = "Update.end failed";
+          Update.printError(Serial);
+          return;
+        }
+        gFwUpdateOk = true;
+      }
+    }
+  );
 
   // WebSocket
   ws.onEvent(onWsEvent);
