@@ -16,6 +16,16 @@
 #include "secrets.example.h"
 #endif
 
+#ifndef SCANRIG_FW_VERSION
+#define SCANRIG_FW_VERSION "0.4.0"
+#endif
+#ifndef SCANRIG_UI_VERSION
+#define SCANRIG_UI_VERSION "0.4.0"
+#endif
+#ifndef SCANRIG_UPDATE_MANIFEST_URL
+#define SCANRIG_UPDATE_MANIFEST_URL ""
+#endif
+
 /*
 RealityScanRig3000 – ESP32-S3: UI (WebSocket) + BLE Turntable + Sequencer (v1)
 
@@ -208,6 +218,9 @@ static volatile bool gBleDisconnectSeen = false;
 static bool gFwUpdateInProgress = false;
 static bool gFwUpdateOk = false;
 static String gFwUpdateError = "";
+static const char* FW_VERSION = SCANRIG_FW_VERSION;
+static const char* UI_VERSION = SCANRIG_UI_VERSION;
+static const char* UPDATE_MANIFEST_URL = SCANRIG_UPDATE_MANIFEST_URL;
 
 class TTClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*) override {
@@ -1002,6 +1015,9 @@ static String buildRigStateJson() {
   j += "\"SNAP_COOLDOWN_MS\":\"" + String(gSnapCooldownMs) + "\",";
   j += "\"ROT_STEP_MS_AVG\":\"" + String(gRotStepMsAvg, 1) + "\",";
   j += "\"ANGLE_LAST\":\"" + String(gLastAngle, 2) + "\",";
+  j += "\"FW_VER\":\"" + String(FW_VERSION) + "\",";
+  j += "\"UI_VER\":\"" + String(UI_VERSION) + "\",";
+  j += "\"UPDATE_URL\":\"" + jsonEscape(String(UPDATE_MANIFEST_URL)) + "\",";
   j += "\"BLE\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"TT\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"IP\":\"" + ip + "\",";

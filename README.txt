@@ -60,3 +60,24 @@ Goal: ship firmware to users without PlatformIO/Arduino setup.
 4) OTA updates from UI:
    Users can later upload a new `firmware.bin` directly in the web UI
    (Console card: "Upload Firmware (.bin)"), no IDE required.
+   The same card also supports "Check Updates" against hosted `manifest.json`.
+
+Versioning
+----------
+Current firmware/UI versions are defined in `src/main.cpp`:
+- `SCANRIG_FW_VERSION`
+- `SCANRIG_UI_VERSION`
+
+Optional prefilled update-check URL can be set in:
+- `src/secrets.local.h` (or `src/secrets.example.h`) as `SCANRIG_UPDATE_MANIFEST_URL`
+
+Local staging test (before public hosting)
+------------------------------------------
+Create a local, fully testable installer folder:
+
+`powershell -ExecutionPolicy Bypass -File .\tools\stage-web-installer.ps1`
+
+Then serve it locally:
+1) `cd .\.staging\web-installer\v-<gitsha>`
+2) `python -m http.server 8000`
+3) Open `http://localhost:8000`
