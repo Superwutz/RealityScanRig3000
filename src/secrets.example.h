@@ -23,7 +23,7 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 #define SCANRIG_FIRM_DNS "0.0.0.0"
 #define SCANRIG_FIRM_MASK "255.255.255.0"
 
-// Optional: hosted manifest URL used by UI "Check updates" action.
-// Example:
-// https://<user>.github.io/<repo>/firmware/manifest.json
-#define SCANRIG_UPDATE_MANIFEST_URL ""
+// Hosted manifest URL used by UI "Check updates" action.
+// Public default for this project:
+// https://superwutz.github.io/RealityScanRig3000/manifest.json
+#define SCANRIG_UPDATE_MANIFEST_URL "https://superwutz.github.io/RealityScanRig3000/manifest.json"

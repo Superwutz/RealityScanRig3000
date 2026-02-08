@@ -55,21 +55,18 @@ Primary target hardware:
 
 ## End User Quick Start (No IDE)
 
-### 1) First install via browser (USB)
+### 1) Install via browser (USB)
 
-You (or the project maintainer) host:
-- `manifest.json`
-- `bootloader.bin`
-- `partitions.bin`
-- `boot_app0.bin`
-- `firmware.bin`
-- installer page (`index.html`)
+Use the official installer page:
+
+https://superwutz.github.io/RealityScanRig3000/
 
 User flow:
-1. Open installer page in Chrome/Edge
-2. Connect board via USB
-3. Click install
-4. Open rig UI (`http://scanrig.local` or router-assigned IP)
+1. Open the installer page in Chrome or Edge (desktop).
+2. Connect your ESP32 board with a USB data cable.
+3. Click `Install` and select the board's serial device.
+4. Wait until flashing finishes and the board reboots.
+5. Open rig UI at `http://scanrig.local` (or router-assigned DHCP IP).
 
 ---
 
@@ -84,6 +81,12 @@ After first install, updates can be done from the UI:
 3. Device reboots automatically after successful update
 
 You can still upload a local `.bin` manually via `Upload Firmware (.bin)`.
+
+Default OTA manifest endpoint in firmware:
+
+`https://superwutz.github.io/RealityScanRig3000/manifest.json`
+
+If you need a custom endpoint, override `SCANRIG_UPDATE_MANIFEST_URL` in `src/secrets.local.h`.
 
 ---
 
