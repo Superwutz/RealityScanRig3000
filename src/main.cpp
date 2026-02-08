@@ -1,4 +1,3 @@
-\
 #include <Arduino.h>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -114,7 +113,7 @@ static void wifiStart() {
   if (!wifiSsid.length()) {
     wifiSsid = FIRM_SSID;
     wifiPass = FIRM_PASS;
-    wifiUseStatic = true;
+    wifiUseStatic = (SCANRIG_FIRM_USE_STATIC != 0);
     wifiIpStr = FIRM_IP;
     wifiGwStr = FIRM_GW;
     wifiDnsStr = FIRM_DNS;
@@ -181,16 +180,6 @@ AsyncWebSocket ws("/"); // UI expects ws://host/ // IMPORTANT: path "/" so the U
 
 static void wsBroadcastJson(const String& json) {
   ws.textAll(json);
-}
-static void wsLog(const String& msg) {
-  String j = String("{\"type\":\"log\",\"msg\":") + "\"" + msg + "\"}";
-  // naive JSON escaping for quotes/backslashes/newlines
-  j.replace("\\", "\\\\"); // first escape backslashes
-  j.replace("\"", "\\\"");
-  j.replace("\n", "\\n");
-  j.replace("\r", "");
-  j = String("{\"type\":\"log\",\"msg\":\"") + j.substring(String("{\"type\":\"log\",\"msg\":").length()+1); // already escaped
-  wsBroadcastJson(j);
 }
 static String jsonEscape(const String& s) {
   String out;
@@ -561,6 +550,38 @@ static void seqAbort() {
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] ABORT\"}");
 }
 
+static void seqPauseForBleLoss(bool repeatCurrentStep) {
+  if (gSeqState != SEQ_RUNNING) return;
+  gSeqState = SEQ_PAUSED;
+  gResumePending = true;
+  gResumeSub = SUB_RECOVER;
+  gRecovering = true;
+  gRecoverAttempts = 0;
+  gRecoverStartMs = millis();
+  gRecoverResendNextMs = 0;
+  gNeedRecoverOnConnect = true;
+  gRepeatStep = repeatCurrentStep;
+  gHasResumeAngle = false;
+  wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
+}
+
+static void seqResumeRecoverAfterReconnect() {
+  if (!gNeedRecoverOnConnect || gSeqState == SEQ_IDLE || !gBleConnected) return;
+  gSeqState = SEQ_RUNNING;
+  gSub = SUB_RECOVER;
+  gResumePending = false;
+  gResumeSub = SUB_NONE;
+  gRecovering = true;
+  gRecoverAttempts = 0;
+  gRecoverStartMs = millis();
+  gRecoverResendNextMs = 0;
+  gStateTs = millis();
+  gNextPollTs = 0;
+  gAngleUpdated = false;
+  gNeedRecoverOnConnect = false;
+  wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE reconnected -> RECOVER\"}");
+}
+
 static bool manualTurnStart(int8_t dir, const char* dirLabel) {
   if (!gBleConnected) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[TT] manual move ignored (BLE disconnected)\"}");
@@ -693,12 +714,7 @@ static void manualTiltTick() {
 static void seqTick() {
   if (gSeqState != SEQ_RUNNING) return;
   if (!gBleConnected) {
-    gSeqState = SEQ_PAUSED;
-    gResumePending = true;
-    gResumeSub = SUB_RECOVER;
-    gRecoverStartMs = millis();
-    gHasResumeAngle = false;
-    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
+    seqPauseForBleLoss(false);
     return;
   }
 
@@ -923,8 +939,6 @@ static void seqTick() {
     } break;
 
     case SUB_SNAP: {
-      // Placeholder camera trigger
-      // We also broadcast a log line for the UI.
       wsBroadcastJson("{\"type\":\"rigLine\",\"line\":\"SNAP\"}");
 
       gStateTs = now;
@@ -1059,6 +1073,7 @@ static void handleLine(const String& lineIn) {
   if (line == "TT_TILT_DOWN") { manualTiltStart(-1, "down"); wsSendStatus(); return; }
   if (line == "TT_TILT_ZERO") { manualTiltToZero(); wsSendStatus(); return; }
   if (line == "TT_STOP" || line == "TT_PAUSE") { manualTurnStop(); wsSendStatus(); return; }
+  if (line == "SNAP") { wsBroadcastJson("{\"type\":\"rigLine\",\"line\":\"SNAP\"}"); wsSendStatus(); return; }
 
   // BLE control
   if (line == "BLE_CONNECT") { bool ok = bleConnect(); wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[BLE] connect ") + (ok ? "OK" : "FAIL") + "\"}"); wsSendStatus(); return; }
@@ -1176,6 +1191,7 @@ static void printHelpSerial() {
   Serial.println("  BLE_DISCONNECT");
   Serial.println("  STATUS | START | PAUSE | RESUME | ABORT | RESET");
   Serial.println("  TT_LEFT | TT_RIGHT | TT_ROT_ZERO | TT_TILT_UP | TT_TILT_DOWN | TT_TILT_ZERO | TT_STOP");
+  Serial.println("  SNAP                   (manual camera trigger event)");
   Serial.println("  SET KEY=VAL            e.g. SET ROT_STEPS=72");
   Serial.println("  RAW <raw>              e.g. RAW +QT,CHANGEANGLE;");
   Serial.println();
@@ -1194,7 +1210,7 @@ static void handleSerialCmd(const String& cmd) {
 if (cmd == "WIFI_FIRM") {
   wifiSsid = FIRM_SSID;
   wifiPass = FIRM_PASS;
-  wifiUseStatic = true;
+  wifiUseStatic = (SCANRIG_FIRM_USE_STATIC != 0);
   wifiIpStr = FIRM_IP;
   wifiGwStr = FIRM_GW;
   wifiDnsStr = FIRM_DNS;
@@ -1262,39 +1278,41 @@ if (cmd.startsWith("WIFI ")) {
   handleLine(cmd);
 }
 
-        // ===== BLE Auto-connect / Reconnect =====
-        static bool     gBleAutoConnect = true;
-        static uint32_t gBleNextAttemptMs = 0;
-        static uint32_t gBleBackoffMs = 2000;
+// ===== BLE Auto-connect / Reconnect =====
+static bool gBleAutoConnect = true;
+static uint32_t gBleNextAttemptMs = 0;
+static uint32_t gBleBackoffMs = 2000;
 
-        static void bleNoteAttempt(bool ok) {
-          if (ok) { gBleBackoffMs = 2000; gBleNextAttemptMs = 0; }
-          else {
-            if (gBleBackoffMs < 30000) gBleBackoffMs = min<uint32_t>(30000, gBleBackoffMs * 2);
-            gBleNextAttemptMs = millis() + gBleBackoffMs;
-          }
-        }
+static void bleNoteAttempt(bool ok) {
+  if (ok) {
+    gBleBackoffMs = 2000;
+    gBleNextAttemptMs = 0;
+  } else {
+    if (gBleBackoffMs < 30000) gBleBackoffMs = min<uint32_t>(30000, gBleBackoffMs * 2);
+    gBleNextAttemptMs = millis() + gBleBackoffMs;
+  }
+}
 
-        static void bleAutoConnectTick() {
-          if (!gBleAutoConnect) return;
+static void bleAutoConnectTick() {
+  if (!gBleAutoConnect) return;
 
-          if (gClient && !gClient->isConnected() && gBleConnected) {
-            gBleConnected = false;
-            gChr = nullptr;
-          }
-          if (gBleConnected) return;
+  if (gClient && !gClient->isConnected() && gBleConnected) {
+    gBleConnected = false;
+    gChr = nullptr;
+  }
+  if (gBleConnected) return;
 
-          uint32_t now = millis();
-          if (gBleNextAttemptMs && (int32_t)(now - gBleNextAttemptMs) < 0) return;
+  uint32_t now = millis();
+  if (gBleNextAttemptMs && (int32_t)(now - gBleNextAttemptMs) < 0) return;
 
-          Serial.println("[BLE] autoconnect attempt...");
-          bool ok = bleConnect();
-          const char* r = ok ? "OK" : "FAIL";
-          Serial.printf("[BLE] autoconnect %s (backoff=%lu ms)\n", r, (unsigned long)gBleBackoffMs);
-          bleNoteAttempt(ok);
-        }
+  Serial.println("[BLE] autoconnect attempt...");
+  bool ok = bleConnect();
+  const char* r = ok ? "OK" : "FAIL";
+  Serial.printf("[BLE] autoconnect %s (backoff=%lu ms)\n", r, (unsigned long)gBleBackoffMs);
+  bleNoteAttempt(ok);
+}
 
-        static void bleHeartbeatTick();
+static void bleHeartbeatTick();
 
 static void bleHeartbeatTick() {
   if (!gClient) return;
@@ -1402,37 +1420,14 @@ void loop() {
 
   if (gBleDisconnectSeen) {
     gBleDisconnectSeen = false;
-    if (gSeqState == SEQ_RUNNING) {
-      gSeqState = SEQ_PAUSED;
-      gResumePending = true;
-      gResumeSub = SUB_RECOVER;
-      gRecovering = true;
-      gRecoverAttempts = 0;
-      gRecoverStartMs = millis();
-      gRecoverResendNextMs = 0;
-      gNeedRecoverOnConnect = true;
-      gRepeatStep = true;
-      gHasResumeAngle = false;
-      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
-    }
+    seqPauseForBleLoss(true);
   }
 
   if (lastBle != gBleConnected) {
     lastBle = gBleConnected;
     wsSendStatus();
     if (!gBleConnected) {
-      if (gSeqState == SEQ_RUNNING) {
-        gSeqState = SEQ_PAUSED;
-        gResumePending = true;
-        gResumeSub = SUB_RECOVER;
-        gRecovering = true;
-        gRecoverAttempts = 0;
-        gRecoverStartMs = millis();
-        gRecoverResendNextMs = 0;
-        gNeedRecoverOnConnect = true;
-        gHasResumeAngle = false;
-        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
-      }
+      seqPauseForBleLoss(false);
     } else {
       // Always stop motion on reconnect (safe idle)
       bleWriteRaw("+CT,STOP;");
@@ -1443,40 +1438,12 @@ void loop() {
         gIdleNextPollMs = 0;
         gIdleHaveAngle = false;
       }
-      if (gNeedRecoverOnConnect && gSeqState != SEQ_IDLE) {
-        gSeqState = SEQ_RUNNING;
-        gSub = SUB_RECOVER;
-        gResumePending = false;
-        gResumeSub = SUB_NONE;
-        gRecovering = true;
-        gRecoverAttempts = 0;
-        gRecoverStartMs = millis();
-        gRecoverResendNextMs = 0;
-        gStateTs = millis();
-        gNextPollTs = 0;
-        gAngleUpdated = false;
-        gNeedRecoverOnConnect = false;
-        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE reconnected -> RECOVER\"}");
-      }
+      seqResumeRecoverAfterReconnect();
     }
   }
 
   // Safety: if we missed the edge but need recover and BLE is up, start recovery
-  if (gNeedRecoverOnConnect && gBleConnected && gSeqState != SEQ_IDLE) {
-    gSeqState = SEQ_RUNNING;
-    gSub = SUB_RECOVER;
-    gResumePending = false;
-    gResumeSub = SUB_NONE;
-    gRecovering = true;
-    gRecoverAttempts = 0;
-    gRecoverStartMs = millis();
-    gRecoverResendNextMs = 0;
-    gStateTs = millis();
-    gNextPollTs = 0;
-    gAngleUpdated = false;
-    gNeedRecoverOnConnect = false;
-    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE reconnected -> RECOVER\"}");
-  }
+  seqResumeRecoverAfterReconnect();
 
   // sequencer
   seqTick();
