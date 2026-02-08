@@ -1,64 +1,220 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RealityScanRig3000 Installer</title>
+  <title>RealityScanRig3000 Firmware Installer</title>
   <style>
+    :root {
+      --bg: #070d1a;
+      --bg-soft: #0c1424;
+      --card: #0f1a2f;
+      --card-2: #101d36;
+      --text: #e8eefb;
+      --muted: #aeb9d3;
+      --line: #1d2e53;
+      --accent: #66d39a;
+      --accent-2: #6c98ff;
+      --warn: #ffb86b;
+    }
+
+    * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      background: #0b0e13;
-      color: #e7eefc;
-    }
-    .wrap {
-      max-width: 720px;
-      margin: 0 auto;
-      padding: 28px 18px 40px;
-    }
-    .card {
-      border: 1px solid #1b2333;
-      border-radius: 14px;
-      background: #0d1118;
-      padding: 16px;
-      margin-bottom: 14px;
-    }
-    h1 {
-      margin: 0 0 6px;
-      font-size: 22px;
-    }
-    p, li {
-      color: rgba(231, 238, 252, 0.82);
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% -20%, rgba(108, 152, 255, 0.22), transparent 55%),
+        radial-gradient(circle at 88% -10%, rgba(102, 211, 154, 0.18), transparent 48%),
+        linear-gradient(180deg, #060b15 0%, #070d1a 45%, #060b14 100%);
+      font-family: "Segoe UI", "SF Pro Display", "Inter", Arial, sans-serif;
       line-height: 1.45;
     }
+
+    .container {
+      width: min(980px, 92vw);
+      margin: 0 auto;
+      padding: 30px 0 38px;
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 22px;
+      background: linear-gradient(180deg, rgba(16, 29, 54, 0.9), rgba(12, 20, 36, 0.94));
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+      margin-bottom: 14px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      border: 1px solid #2a4678;
+      border-radius: 999px;
+      color: #c7d7ff;
+      background: rgba(108, 152, 255, 0.14);
+      padding: 5px 10px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(24px, 3.4vw, 34px);
+      letter-spacing: 0.01em;
+    }
+
+    .lead {
+      margin: 8px 0 0;
+      color: var(--muted);
+      max-width: 64ch;
+      font-size: 15px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 14px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+      background: linear-gradient(180deg, rgba(15, 26, 47, 0.95), rgba(12, 20, 36, 0.95));
+    }
+
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 18px;
+    }
+
+    .hint {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .install-wrap {
+      border: 1px dashed #35538a;
+      border-radius: 12px;
+      padding: 14px;
+      background: rgba(108, 152, 255, 0.06);
+    }
+
+    .steps {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .steps li { margin: 8px 0; }
+
+    .ok {
+      color: #b9ffd7;
+      font-weight: 600;
+    }
+
+    .warn {
+      border: 1px solid #5b472b;
+      background: rgba(255, 184, 107, 0.08);
+      color: #ffe2c0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 13px;
+      margin-top: 14px;
+    }
+
+    ul {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    li { margin: 8px 0; }
+
     code {
-      background: #07090e;
-      border: 1px solid #263149;
+      background: rgba(108, 152, 255, 0.12);
+      border: 1px solid #34558f;
       border-radius: 6px;
-      padding: 2px 6px;
+      padding: 1px 6px;
+      color: #d6e2ff;
+    }
+
+    .footer {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(12, 20, 36, 0.86);
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .footer strong { color: #dce7ff; }
+
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .container { width: min(720px, 94vw); }
     }
   </style>
   <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>RealityScanRig3000 Firmware Installer</h1>
-      <p>Install firmware via USB from your browser. No IDE required.</p>
-      <p>
-        <esp-web-install-button manifest="./manifest.json"></esp-web-install-button>
-      </p>
-    </div>
+  <main class="container">
+    <section class="hero">
+      <div class="badge">RealityScanRig3000</div>
+      <h1>Firmware Installer</h1>
+      <p class="lead">Flash your controller over USB directly from the browser. This is the official end-user installer maintained by Superwutz.</p>
+    </section>
 
-    <div class="card">
-      <p><b>Requirements</b></p>
-      <ul>
-        <li>Chrome or Edge on desktop</li>
-        <li>USB data cable</li>
-        <li>Board in normal boot mode</li>
-      </ul>
-      <p>After first install, open <code>http://scanrig.local/</code> or use DHCP IP from your router.</p>
-    </div>
-  </div>
+    <section class="grid">
+      <article class="card">
+        <h2>Install / Update</h2>
+        <p class="hint">Connect your board via USB, then start flashing with one click.</p>
+        <div class="install-wrap">
+          <esp-web-install-button manifest="./manifest.json"></esp-web-install-button>
+        </div>
+        <ol class="steps">
+          <li>Select the correct serial device in the browser popup.</li>
+          <li>Wait until flashing is complete (<span class="ok">do not unplug USB</span>).</li>
+          <li>Open <code>http://scanrig.local/</code> or your router-assigned IP.</li>
+        </ol>
+        <div class="warn">
+          If your board is not detected, use a USB data cable and close apps that lock the serial port.
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>Requirements</h2>
+        <ul>
+          <li>Desktop Chrome or Edge (Web Serial support required).</li>
+          <li>ESP32 board with stable USB power.</li>
+          <li>No serial monitor open while flashing.</li>
+        </ul>
+
+        <h2 style="margin-top:16px;">Troubleshooting</h2>
+        <ul>
+          <li><strong>"Failed to initialize"</strong>: reconnect USB and retry.</li>
+          <li><strong>"Manifest error"</strong>: hard-refresh the page and run again.</li>
+          <li><strong>No UI after flash</strong>: check Wi-Fi credentials in local secrets and reboot once.</li>
+        </ul>
+      </article>
+    </section>
+
+    <footer class="footer">
+      <span><strong>RealityScanRig3000</strong> - built for reproducible dual-axis scan workflows.</span>
+      <span>Maintained by <strong>Superwutz</strong> | Use at your own risk.</span>
+    </footer>
+  </main>
 </body>
 </html>
