@@ -17,10 +17,12 @@
 .env
 
 # Local extracted UI assets (generated from src/web_assets.h)
-app.js
-style.css
-index.html
+/app.js
+/style.css
+/index.html
 .tmp_ui/
+release/
+.staging/
 
 # Local secrets (do not commit)
 src/secrets.local.h

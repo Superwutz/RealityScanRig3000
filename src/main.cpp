@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
+#include <Update.h>
 
 #include <NimBLEDevice.h>
 
@@ -13,6 +14,16 @@
 #include "secrets.local.h"
 #else
 #include "secrets.example.h"
+#endif
+
+#ifndef SCANRIG_FW_VERSION
+#define SCANRIG_FW_VERSION "0.4.2"
+#endif
+#ifndef SCANRIG_UI_VERSION
+#define SCANRIG_UI_VERSION "0.4.2"
+#endif
+#ifndef SCANRIG_UPDATE_MANIFEST_URL
+#define SCANRIG_UPDATE_MANIFEST_URL ""
 #endif
 
 /*
@@ -204,6 +215,12 @@ static NimBLEClient* gClient = nullptr;
 static NimBLERemoteCharacteristic* gChr = nullptr;
 static bool gBleConnected = false;
 static volatile bool gBleDisconnectSeen = false;
+static bool gFwUpdateInProgress = false;
+static bool gFwUpdateOk = false;
+static String gFwUpdateError = "";
+static const char* FW_VERSION = SCANRIG_FW_VERSION;
+static const char* UI_VERSION = SCANRIG_UI_VERSION;
+static const char* UPDATE_MANIFEST_URL = SCANRIG_UPDATE_MANIFEST_URL;
 
 class TTClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*) override {
@@ -998,6 +1015,9 @@ static String buildRigStateJson() {
   j += "\"SNAP_COOLDOWN_MS\":\"" + String(gSnapCooldownMs) + "\",";
   j += "\"ROT_STEP_MS_AVG\":\"" + String(gRotStepMsAvg, 1) + "\",";
   j += "\"ANGLE_LAST\":\"" + String(gLastAngle, 2) + "\",";
+  j += "\"FW_VER\":\"" + String(FW_VERSION) + "\",";
+  j += "\"UI_VER\":\"" + String(UI_VERSION) + "\",";
+  j += "\"UPDATE_URL\":\"" + jsonEscape(String(UPDATE_MANIFEST_URL)) + "\",";
   j += "\"BLE\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"TT\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"IP\":\"" + ip + "\",";
@@ -1379,6 +1399,59 @@ void setup() {
   server.on("/app.js", HTTP_GET, [](AsyncWebServerRequest* req) {
     req->send(200, "application/javascript; charset=utf-8", APP_JS, APP_JS_LEN);
   });
+  server.on("/api/update", HTTP_POST,
+    [](AsyncWebServerRequest* req) {
+      bool ok = gFwUpdateOk && !Update.hasError();
+      int code = ok ? 200 : 500;
+      String body = ok
+        ? String("{\"ok\":true,\"msg\":\"update successful; rebooting\"}")
+        : String("{\"ok\":false,\"msg\":\"") + jsonEscape(gFwUpdateError.length() ? gFwUpdateError : String("update failed")) + "\"}";
+      req->send(code, "application/json; charset=utf-8", body);
+
+      gFwUpdateInProgress = false;
+      if (ok) {
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[FW] update successful -> reboot\"}");
+        delay(200);
+        ESP.restart();
+      }
+    },
+    [](AsyncWebServerRequest* req, String filename, size_t index, uint8_t* data, size_t len, bool final) {
+      (void)req;
+      if (index == 0) {
+        gFwUpdateInProgress = true;
+        gFwUpdateOk = false;
+        gFwUpdateError = "";
+        if (gSeqState == SEQ_RUNNING) {
+          gFwUpdateError = "cannot update while sequence is running";
+          return;
+        }
+        if (!filename.length()) filename = "firmware.bin";
+        wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[FW] update upload start: ")
+                        + jsonEscape(filename) + "\"}");
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+          gFwUpdateError = "Update.begin failed";
+          Update.printError(Serial);
+          return;
+        }
+      }
+
+      if (gFwUpdateError.length()) return;
+      if (len && (Update.write(data, len) != len)) {
+        gFwUpdateError = "Update.write failed";
+        Update.printError(Serial);
+        return;
+      }
+
+      if (final) {
+        if (!Update.end(true)) {
+          gFwUpdateError = "Update.end failed";
+          Update.printError(Serial);
+          return;
+        }
+        gFwUpdateOk = true;
+      }
+    }
+  );
 
   // WebSocket
   ws.onEvent(onWsEvent);
