@@ -27,3 +27,14 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 // Public default for this project:
 // https://superwutz.github.io/RealityScanRig3000/manifest.json
 #define SCANRIG_UPDATE_MANIFEST_URL "https://superwutz.github.io/RealityScanRig3000/manifest.json"
+
+// Camera trigger hardware (optocoupler output pins on ESP32-S3).
+// Set to -1 to disable a pin.
+#define SCANRIG_CAM_FOCUS_PIN -1
+#define SCANRIG_CAM_SHUTTER_PIN -1
+#define SCANRIG_CAM_ACTIVE_LOW 1
+#define SCANRIG_CAM_PRESS_MS 120
+#define SCANRIG_CAM_PREFOCUS_MS 0
+
+// Smartphone Bluetooth shutter profile name (BLE HID peripheral).
+#define SCANRIG_SMARTPHONE_BT_NAME "RealityScanRig3000 Remote"

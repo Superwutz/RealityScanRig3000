@@ -5,6 +5,7 @@
 #include <Update.h>
 
 #include <NimBLEDevice.h>
+#include <NimBLEHIDDevice.h>
 
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
@@ -24,6 +25,24 @@
 #endif
 #ifndef SCANRIG_UPDATE_MANIFEST_URL
 #define SCANRIG_UPDATE_MANIFEST_URL ""
+#endif
+#ifndef SCANRIG_SMARTPHONE_BT_NAME
+#define SCANRIG_SMARTPHONE_BT_NAME "RealityScanRig3000 Remote"
+#endif
+#ifndef SCANRIG_CAM_FOCUS_PIN
+#define SCANRIG_CAM_FOCUS_PIN -1
+#endif
+#ifndef SCANRIG_CAM_SHUTTER_PIN
+#define SCANRIG_CAM_SHUTTER_PIN -1
+#endif
+#ifndef SCANRIG_CAM_ACTIVE_LOW
+#define SCANRIG_CAM_ACTIVE_LOW 1
+#endif
+#ifndef SCANRIG_CAM_PRESS_MS
+#define SCANRIG_CAM_PRESS_MS 120
+#endif
+#ifndef SCANRIG_CAM_PREFOCUS_MS
+#define SCANRIG_CAM_PREFOCUS_MS 0
 #endif
 
 /*
@@ -77,6 +96,33 @@ static const char* FIRM_MASK = SCANRIG_FIRM_MASK;
 
 static bool   wifiUseStatic = (SCANRIG_FIRM_USE_STATIC != 0);
 static String wifiIpStr, wifiGwStr, wifiDnsStr, wifiMaskStr;
+static const char* SMARTPHONE_BT_NAME = SCANRIG_SMARTPHONE_BT_NAME;
+static const int CAM_FOCUS_PIN = SCANRIG_CAM_FOCUS_PIN;
+static const int CAM_SHUTTER_PIN = SCANRIG_CAM_SHUTTER_PIN;
+static const bool CAM_ACTIVE_LOW = (SCANRIG_CAM_ACTIVE_LOW != 0);
+static const uint32_t CAM_PRESS_MS = SCANRIG_CAM_PRESS_MS;
+static const uint32_t CAM_PREFOCUS_MS = SCANRIG_CAM_PREFOCUS_MS;
+
+enum TriggerMode : uint8_t {
+  TRIGGER_MODE_HW = 0,
+  TRIGGER_MODE_SMARTPHONE = 1,
+};
+static TriggerMode gTriggerMode = TRIGGER_MODE_HW;
+static TriggerMode gSeqTriggerMode = TRIGGER_MODE_HW;
+
+static NimBLEServer* gPhoneServer = nullptr;
+static NimBLEHIDDevice* gPhoneHid = nullptr;
+static NimBLECharacteristic* gPhoneInput = nullptr;
+static bool gPhoneConnected = false;
+static bool gPhonePairing = false;
+static String gPhonePeerName = "";
+static bool gNeedPhoneRecoverOnConnect = false;
+static bool gBleAutoConnect = true;
+static volatile bool gPhoneConnectSeen = false;
+static volatile bool gPhoneDisconnectSeen = false;
+static volatile bool gReqPhonePairStart = false;
+static volatile bool gReqPhonePairStop = false;
+static void bleDisconnect();
 
 static bool parseIP(const String& s, IPAddress& out) {
   int a, b, c, d;
@@ -114,6 +160,19 @@ static void saveWifiStatic(bool useStatic, const String& ip, const String& gw, c
   prefs.putString("gw", gw);
   prefs.putString("dns", dns);
   prefs.putString("mask", mask);
+  prefs.end();
+}
+
+static void loadTriggerMode() {
+  prefs.begin("scanrig", true);
+  int mode = prefs.getInt("trigMode", (int)TRIGGER_MODE_HW);
+  prefs.end();
+  gTriggerMode = (mode == (int)TRIGGER_MODE_SMARTPHONE) ? TRIGGER_MODE_SMARTPHONE : TRIGGER_MODE_HW;
+}
+
+static void saveTriggerMode(TriggerMode mode) {
+  prefs.begin("scanrig", false);
+  prefs.putInt("trigMode", (int)mode);
   prefs.end();
 }
 
@@ -206,6 +265,187 @@ static String jsonEscape(const String& s) {
   return out;
 }
 
+static inline uint8_t camIdleLevel() { return CAM_ACTIVE_LOW ? HIGH : LOW; }
+static inline uint8_t camActiveLevel() { return CAM_ACTIVE_LOW ? LOW : HIGH; }
+
+class PhoneHidServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* s, ble_gap_conn_desc* desc) override {
+    (void)s;
+    if (desc) {
+      NimBLEAddress idAddr(desc->peer_id_addr);
+      gPhonePeerName = idAddr.toString().c_str();
+    } else {
+      gPhonePeerName = "";
+    }
+    gPhoneConnected = true;
+    gPhonePairing = false;
+    gBleAutoConnect = true;
+    gPhoneConnectSeen = true;
+  }
+  void onConnect(NimBLEServer* s) override {
+    (void)s;
+    if (!gPhoneConnected) {
+      gPhoneConnected = true;
+      gPhonePairing = false;
+      gBleAutoConnect = true;
+      gPhoneConnectSeen = true;
+    }
+  }
+  void onDisconnect(NimBLEServer* s, ble_gap_conn_desc* desc) override {
+    (void)desc;
+    gPhoneConnected = false;
+    gPhonePeerName = "";
+    gPhoneDisconnectSeen = true;
+    if (gPhonePairing && s && s->getAdvertising()) {
+      s->getAdvertising()->start();
+    }
+  }
+  void onDisconnect(NimBLEServer* s) override {
+    gPhoneConnected = false;
+    gPhonePeerName = "";
+    gPhoneDisconnectSeen = true;
+    if (gPhonePairing && s && s->getAdvertising()) {
+      s->getAdvertising()->start();
+    }
+  }
+};
+static PhoneHidServerCallbacks gPhoneHidCbs;
+
+static bool triggerCameraHardware() {
+  if (CAM_SHUTTER_PIN < 0) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] hardware trigger disabled (no shutter pin)\"}");
+    return false;
+  }
+
+  if (CAM_FOCUS_PIN >= 0) {
+    digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
+    if (CAM_PREFOCUS_MS > 0) delay(CAM_PREFOCUS_MS);
+  }
+  digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
+  delay(CAM_PRESS_MS);
+  digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+  if (CAM_FOCUS_PIN >= 0) {
+    digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+  }
+  return true;
+}
+
+static void phonePairingStart() {
+  if (!gPhoneServer || !gPhoneServer->getAdvertising()) return;
+  bleDisconnect();
+  gPhonePairing = true;
+  NimBLEAdvertising* adv = gPhoneServer->getAdvertising();
+  bool ok = adv->isAdvertising() ? true : adv->start();
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[PHONE] pairing enabled (advertising ")
+                  + (ok ? "OK" : "FAIL") + ")\"}");
+}
+
+static void phonePairingStop() {
+  if (!gPhoneServer || !gPhoneServer->getAdvertising()) return;
+  gPhonePairing = false;
+  bool ok = true;
+  if (!gPhoneConnected && gPhoneServer->getAdvertising()->isAdvertising()) {
+    ok = gPhoneServer->getAdvertising()->stop();
+  }
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[PHONE] pairing disabled (")
+                  + (ok ? "OK" : "FAIL") + ")\"}");
+}
+
+static void phoneDisconnect() {
+  if (!gPhoneServer) return;
+  gPhonePairing = false;
+  gPhoneConnected = false;
+  gPhonePeerName = "";
+  if (gPhoneServer->getAdvertising() && gPhoneServer->getAdvertising()->isAdvertising()) {
+    gPhoneServer->getAdvertising()->stop();
+  }
+  int n = 0;
+  auto peers = gPhoneServer->getPeerDevices();
+  for (auto connId : peers) {
+    gPhoneServer->disconnect(connId);
+    n++;
+  }
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[PHONE] disconnect requested (")
+                  + String(n) + " peer(s))\"}");
+}
+
+static void phoneDisableForHardwareMode() {
+  gReqPhonePairStart = false;
+  gReqPhonePairStop = false;
+  phonePairingStop();
+  phoneDisconnect();
+}
+
+static bool triggerCameraSmartphone() {
+  if (!gPhoneConnected || !gPhoneInput) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] smartphone trigger unavailable (not connected)\"}");
+    return false;
+  }
+
+  // Consumer key: Volume Increment (0x00E9), recognized as shutter by many camera apps.
+  uint8_t press[2] = { 0xE9, 0x00 };
+  uint8_t release[2] = { 0x00, 0x00 };
+  gPhoneInput->setValue(press, sizeof(press));
+  gPhoneInput->notify();
+  delay(30);
+  gPhoneInput->setValue(release, sizeof(release));
+  gPhoneInput->notify();
+  return true;
+}
+
+static bool triggerCamera() {
+  if (gTriggerMode == TRIGGER_MODE_SMARTPHONE) return triggerCameraSmartphone();
+  return triggerCameraHardware();
+}
+
+static void initSmartphoneTriggerBle() {
+  static bool inited = false;
+  if (inited) return;
+  inited = true;
+
+  gPhoneServer = NimBLEDevice::createServer();
+  if (!gPhoneServer) return;
+  gPhoneServer->setCallbacks(&gPhoneHidCbs);
+
+  gPhoneHid = new NimBLEHIDDevice(gPhoneServer);
+  if (!gPhoneHid) return;
+
+  // Single consumer-control input report (volume up shutter pulse).
+  static const uint8_t reportMap[] = {
+    0x05, 0x0C,       // Usage Page (Consumer)
+    0x09, 0x01,       // Usage (Consumer Control)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x01,       // Report ID (1)
+    0x15, 0x00,       // Logical Minimum (0)
+    0x26, 0x9C, 0x02, // Logical Maximum (668)
+    0x19, 0x00,       // Usage Minimum (0)
+    0x2A, 0x9C, 0x02, // Usage Maximum (668)
+    0x75, 0x10,       // Report Size (16)
+    0x95, 0x01,       // Report Count (1)
+    0x81, 0x00,       // Input (Data, Array, Abs)
+    0xC0              // End Collection
+  };
+
+  gPhoneInput = gPhoneHid->inputReport(1);
+  gPhoneHid->manufacturer()->setValue("Superwutz");
+  gPhoneHid->pnp(0x02, 0xe502, 0xa111, 0x0110);
+  gPhoneHid->hidInfo(0x00, 0x01);
+  gPhoneHid->reportMap((uint8_t*)reportMap, sizeof(reportMap));
+  gPhoneHid->startServices();
+  gPhoneServer->start();
+
+  NimBLEAdvertising* adv = gPhoneServer->getAdvertising();
+  if (adv) {
+    NimBLEDevice::setDeviceName(SMARTPHONE_BT_NAME);
+    adv->setScanResponse(true);
+    adv->setMinPreferred(0x06);
+    adv->setMaxPreferred(0x12);
+    adv->setAppearance(0x03C1); // Generic HID
+    adv->addServiceUUID(gPhoneHid->hidService()->getUUID());
+    adv->setName(SMARTPHONE_BT_NAME);
+  }
+}
+
 // ===== Turntable BLE =====
 static const char* TT_NAME = "REVO_DUAL_AXIS_TABLE";
 static const NimBLEUUID TT_SVC_UUID((uint16_t)0xFFE0);
@@ -227,7 +467,6 @@ class TTClientCallbacks : public NimBLEClientCallbacks {
     gBleConnected = false;
     gChr = nullptr;
     Serial.println("[BLE] disconnected");
-    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[BLE] disconnected\"}");
     gBleDisconnectSeen = true;
   }
 };
@@ -521,6 +760,8 @@ static void seqResetInternal() {
   gRepeatStep = false;
   gHasResumeAngle = false;
   gSeekAttempts = 0;
+  gNeedPhoneRecoverOnConnect = false;
+  gSeqTriggerMode = gTriggerMode;
 
   gRotStepStartMs = 0;
   gRotStepMsAvg = 0.0f;
@@ -534,7 +775,12 @@ static void seqResetInternal() {
 
 static void seqStart() {
   if (!gBleConnected) return;
+  if (gTriggerMode == TRIGGER_MODE_SMARTPHONE && !gPhoneConnected) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] START blocked: smartphone trigger selected but phone not connected\"}");
+    return;
+  }
   seqResetInternal();
+  gSeqTriggerMode = gTriggerMode;
   gSeqState = SEQ_RUNNING;
   gSub = SUB_TILT_SEND;
   gResumePending = false;
@@ -577,9 +823,26 @@ static void seqPauseForBleLoss(bool repeatCurrentStep) {
   gRecoverStartMs = millis();
   gRecoverResendNextMs = 0;
   gNeedRecoverOnConnect = true;
+  gNeedPhoneRecoverOnConnect = false;
   gRepeatStep = repeatCurrentStep;
   gHasResumeAngle = false;
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
+}
+
+static void seqPauseForPhoneLoss(bool repeatCurrentStep) {
+  if (gSeqState != SEQ_RUNNING) return;
+  gSeqState = SEQ_PAUSED;
+  gResumePending = true;
+  gResumeSub = SUB_RECOVER;
+  gRecovering = true;
+  gRecoverAttempts = 0;
+  gRecoverStartMs = millis();
+  gRecoverResendNextMs = 0;
+  gNeedRecoverOnConnect = false;
+  gNeedPhoneRecoverOnConnect = true;
+  gRepeatStep = repeatCurrentStep;
+  gHasResumeAngle = false;
+  wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] PHONE lost -> PAUSE\"}");
 }
 
 static void seqResumeRecoverAfterReconnect() {
@@ -597,6 +860,23 @@ static void seqResumeRecoverAfterReconnect() {
   gAngleUpdated = false;
   gNeedRecoverOnConnect = false;
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE reconnected -> RECOVER\"}");
+}
+
+static void seqResumeRecoverAfterPhoneReconnect() {
+  if (!gNeedPhoneRecoverOnConnect || gSeqState == SEQ_IDLE || !gPhoneConnected || !gBleConnected) return;
+  gSeqState = SEQ_RUNNING;
+  gSub = SUB_RECOVER;
+  gResumePending = false;
+  gResumeSub = SUB_NONE;
+  gRecovering = true;
+  gRecoverAttempts = 0;
+  gRecoverStartMs = millis();
+  gRecoverResendNextMs = 0;
+  gStateTs = millis();
+  gNextPollTs = 0;
+  gAngleUpdated = false;
+  gNeedPhoneRecoverOnConnect = false;
+  wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] PHONE reconnected -> RECOVER\"}");
 }
 
 static bool manualTurnStart(int8_t dir, const char* dirLabel) {
@@ -957,6 +1237,9 @@ static void seqTick() {
 
     case SUB_SNAP: {
       wsBroadcastJson("{\"type\":\"rigLine\",\"line\":\"SNAP\"}");
+      bool ok = triggerCamera();
+      wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] ")
+                      + (ok ? "OK" : "FAIL") + "\"}");
 
       gStateTs = now;
       gSub = SUB_COOLDOWN;
@@ -1018,6 +1301,11 @@ static String buildRigStateJson() {
   j += "\"FW_VER\":\"" + String(FW_VERSION) + "\",";
   j += "\"UI_VER\":\"" + String(UI_VERSION) + "\",";
   j += "\"UPDATE_URL\":\"" + jsonEscape(String(UPDATE_MANIFEST_URL)) + "\",";
+  j += "\"TRIGGER_MODE\":\"" + String(gTriggerMode == TRIGGER_MODE_SMARTPHONE ? "SMARTPHONE" : "HARDWARE") + "\",";
+  j += "\"PHONE_BT\":\"" + String(gPhoneConnected ? 1 : 0) + "\",";
+  j += "\"PHONE_PAIRING\":\"" + String(gPhonePairing ? 1 : 0) + "\",";
+  j += "\"PHONE_NAME\":\"" + jsonEscape(String(SMARTPHONE_BT_NAME)) + "\",";
+  j += "\"PHONE_PEER\":\"" + jsonEscape(gPhonePeerName) + "\",";
   j += "\"BLE\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"TT\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"IP\":\"" + ip + "\",";
@@ -1065,6 +1353,24 @@ static void setKeyVal(const String& key, const String& val) {
     gSnapSettleMs = (uint32_t)val.toInt();
   } else if (key == "SNAP_COOLDOWN_MS") {
     gSnapCooldownMs = (uint32_t)val.toInt();
+  } else if (key == "TRIGGER_MODE") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger mode change blocked (sequence running)\"}");
+      return;
+    }
+    String mode = val;
+    mode.trim();
+    mode.toUpperCase();
+    TriggerMode nextMode = (mode == "SMARTPHONE") ? TRIGGER_MODE_SMARTPHONE : TRIGGER_MODE_HW;
+    if (nextMode != gTriggerMode) {
+      gTriggerMode = nextMode;
+      saveTriggerMode(gTriggerMode);
+      if (gTriggerMode == TRIGGER_MODE_HW) {
+        phoneDisableForHardwareMode();
+      }
+      wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] mode -> ")
+                      + (gTriggerMode == TRIGGER_MODE_SMARTPHONE ? "SMARTPHONE" : "HARDWARE") + "\"}");
+    }
   } else if (key == "WIFI_SSID") {
     wifiSsid = val;
     saveWifiCreds(wifiSsid, wifiPass);
@@ -1093,7 +1399,56 @@ static void handleLine(const String& lineIn) {
   if (line == "TT_TILT_DOWN") { manualTiltStart(-1, "down"); wsSendStatus(); return; }
   if (line == "TT_TILT_ZERO") { manualTiltToZero(); wsSendStatus(); return; }
   if (line == "TT_STOP" || line == "TT_PAUSE") { manualTurnStop(); wsSendStatus(); return; }
-  if (line == "SNAP") { wsBroadcastJson("{\"type\":\"rigLine\",\"line\":\"SNAP\"}"); wsSendStatus(); return; }
+  if (line == "SNAP") {
+    wsBroadcastJson("{\"type\":\"rigLine\",\"line\":\"SNAP\"}");
+    bool ok = triggerCamera();
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] ")
+                    + (ok ? "OK" : "FAIL") + "\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "PHONE_PAIR_START") {
+    gReqPhonePairStart = true;
+    gReqPhonePairStop = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[PHONE] pairing start requested\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "PHONE_PAIR_STOP") {
+    gReqPhonePairStop = true;
+    gReqPhonePairStart = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[PHONE] pairing stop requested\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "PHONE_DISCONNECT") {
+    phoneDisconnect();
+    wsSendStatus();
+    return;
+  }
+  if (line == "TRIGGER_MODE_HW") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger mode change blocked (sequence running)\"}");
+      wsSendStatus();
+      return;
+    }
+    gTriggerMode = TRIGGER_MODE_HW;
+    saveTriggerMode(gTriggerMode);
+    phoneDisableForHardwareMode();
+    wsSendStatus();
+    return;
+  }
+  if (line == "TRIGGER_MODE_SMARTPHONE") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger mode change blocked (sequence running)\"}");
+      wsSendStatus();
+      return;
+    }
+    gTriggerMode = TRIGGER_MODE_SMARTPHONE;
+    saveTriggerMode(gTriggerMode);
+    wsSendStatus();
+    return;
+  }
 
   // BLE control
   if (line == "BLE_CONNECT") { bool ok = bleConnect(); wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[BLE] connect ") + (ok ? "OK" : "FAIL") + "\"}"); wsSendStatus(); return; }
@@ -1212,6 +1567,8 @@ static void printHelpSerial() {
   Serial.println("  STATUS | START | PAUSE | RESUME | ABORT | RESET");
   Serial.println("  TT_LEFT | TT_RIGHT | TT_ROT_ZERO | TT_TILT_UP | TT_TILT_DOWN | TT_TILT_ZERO | TT_STOP");
   Serial.println("  SNAP                   (manual camera trigger event)");
+  Serial.println("  TRIGGER_MODE_HW | TRIGGER_MODE_SMARTPHONE");
+  Serial.println("  PHONE_PAIR_START | PHONE_PAIR_STOP | PHONE_DISCONNECT");
   Serial.println("  SET KEY=VAL            e.g. SET ROT_STEPS=72");
   Serial.println("  RAW <raw>              e.g. RAW +QT,CHANGEANGLE;");
   Serial.println();
@@ -1299,7 +1656,6 @@ if (cmd.startsWith("WIFI ")) {
 }
 
 // ===== BLE Auto-connect / Reconnect =====
-static bool gBleAutoConnect = true;
 static uint32_t gBleNextAttemptMs = 0;
 static uint32_t gBleBackoffMs = 2000;
 
@@ -1315,6 +1671,7 @@ static void bleNoteAttempt(bool ok) {
 
 static void bleAutoConnectTick() {
   if (!gBleAutoConnect) return;
+  if (gPhonePairing && !gPhoneConnected) return;
 
   if (gClient && !gClient->isConnected() && gBleConnected) {
     gBleConnected = false;
@@ -1379,12 +1736,24 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  if (CAM_FOCUS_PIN >= 0) {
+    pinMode(CAM_FOCUS_PIN, OUTPUT);
+    digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+  }
+  if (CAM_SHUTTER_PIN >= 0) {
+    pinMode(CAM_SHUTTER_PIN, OUTPUT);
+    digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+  }
+
+  loadTriggerMode();
+
   loadWifiCreds();
   wifiStart();
   mdnsStart();
 
   // BLE init (lazy connect)
   bleInitOnce();
+  initSmartphoneTriggerBle();
 
   // Web routes
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -1477,6 +1846,23 @@ void loop() {
 
   // BLE autoconnect
   static bool lastBle = false;
+  if (gReqPhonePairStart) {
+    gReqPhonePairStart = false;
+    phonePairingStart();
+    wsSendStatus();
+  }
+  if (gReqPhonePairStop) {
+    gReqPhonePairStop = false;
+    phonePairingStop();
+    wsSendStatus();
+  }
+  if (gTriggerMode == TRIGGER_MODE_HW && gPhoneServer) {
+    bool advOn = gPhoneServer->getAdvertising() && gPhoneServer->getAdvertising()->isAdvertising();
+    if (gPhonePairing || gPhoneConnected || advOn) {
+      phoneDisableForHardwareMode();
+      wsSendStatus();
+    }
+  }
   bleAutoConnectTick();
   bleHeartbeatTick();
 
@@ -1493,7 +1879,29 @@ void loop() {
 
   if (gBleDisconnectSeen) {
     gBleDisconnectSeen = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[BLE] disconnected\"}");
     seqPauseForBleLoss(true);
+  }
+
+  if (gPhoneConnectSeen) {
+    gPhoneConnectSeen = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[PHONE] smartphone connected\"}");
+    seqResumeRecoverAfterPhoneReconnect();
+    wsSendStatus();
+  }
+  if (gPhoneDisconnectSeen) {
+    gPhoneDisconnectSeen = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[PHONE] smartphone disconnected\"}");
+    if (gSeqTriggerMode == TRIGGER_MODE_SMARTPHONE) {
+      seqPauseForPhoneLoss(true);
+    }
+    wsSendStatus();
+  }
+  // Hard guard: never advertise unless pairing was explicitly requested.
+  if (gPhoneServer && gPhoneServer->getAdvertising() && !gPhonePairing && !gPhoneConnected) {
+    if (gPhoneServer->getAdvertising()->isAdvertising()) {
+      gPhoneServer->getAdvertising()->stop();
+    }
   }
 
   if (lastBle != gBleConnected) {
@@ -1517,6 +1925,7 @@ void loop() {
 
   // Safety: if we missed the edge but need recover and BLE is up, start recovery
   seqResumeRecoverAfterReconnect();
+  seqResumeRecoverAfterPhoneReconnect();
 
   // sequencer
   seqTick();
