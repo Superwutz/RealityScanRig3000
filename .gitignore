@@ -10,6 +10,7 @@
 *.elf
 *.map
 *.zip
+!docs/*.bin
 
 # Logs / misc
 *.log
