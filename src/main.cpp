@@ -682,7 +682,7 @@ static uint32_t gRotTimeoutMs = 8000;
 static float    gRotTolDeg = 1.0f;
 static uint32_t gSnapSettleMs = 250;
 static uint32_t gSnapCooldownMs = 500;
-static uint32_t gTiltMoveMs = 5000;
+static uint32_t gTiltMoveMs = 8000;
 static uint32_t gTiltReserveMs = 0;
 
 static int gTiltIdx = 0;
