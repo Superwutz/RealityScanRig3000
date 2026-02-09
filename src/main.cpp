@@ -44,6 +44,15 @@
 #ifndef SCANRIG_CAM_PREFOCUS_MS
 #define SCANRIG_CAM_PREFOCUS_MS 0
 #endif
+#ifndef SCANRIG_CAM_AF_PREFOCUS_MS
+#define SCANRIG_CAM_AF_PREFOCUS_MS 450
+#endif
+#ifndef SCANRIG_CAM_AF_SHUTTER_MS
+#define SCANRIG_CAM_AF_SHUTTER_MS 180
+#endif
+#ifndef SCANRIG_CAM_AF_POSTFOCUS_MS
+#define SCANRIG_CAM_AF_POSTFOCUS_MS 80
+#endif
 
 /*
 RealityScanRig3000 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ ESP32-S3: UI (WebSocket) + BLE Turntable + Sequencer (v1)
@@ -102,6 +111,9 @@ static const int CAM_SHUTTER_PIN = SCANRIG_CAM_SHUTTER_PIN;
 static const bool CAM_ACTIVE_LOW = (SCANRIG_CAM_ACTIVE_LOW != 0);
 static const uint32_t CAM_PRESS_MS = SCANRIG_CAM_PRESS_MS;
 static const uint32_t CAM_PREFOCUS_MS = SCANRIG_CAM_PREFOCUS_MS;
+static const uint32_t CAM_AF_PREFOCUS_MS = SCANRIG_CAM_AF_PREFOCUS_MS;
+static const uint32_t CAM_AF_SHUTTER_MS = SCANRIG_CAM_AF_SHUTTER_MS;
+static const uint32_t CAM_AF_POSTFOCUS_MS = SCANRIG_CAM_AF_POSTFOCUS_MS;
 
 enum TriggerMode : uint8_t {
   TRIGGER_MODE_HW = 0,
@@ -110,6 +122,7 @@ enum TriggerMode : uint8_t {
 static TriggerMode gTriggerMode = TRIGGER_MODE_HW;
 static TriggerMode gSeqTriggerMode = TRIGGER_MODE_HW;
 static bool gTriggerEnabled = true;
+static bool gAutoFocusEnabled = true;
 
 static NimBLEServer* gPhoneServer = nullptr;
 static NimBLEHIDDevice* gPhoneHid = nullptr;
@@ -174,6 +187,18 @@ static void loadTriggerMode() {
 static void saveTriggerMode(TriggerMode mode) {
   prefs.begin("scanrig", false);
   prefs.putInt("trigMode", (int)mode);
+  prefs.end();
+}
+
+static void loadAutoFocusMode() {
+  prefs.begin("scanrig", true);
+  gAutoFocusEnabled = prefs.getBool("afMode", true);
+  prefs.end();
+}
+
+static void saveAutoFocusMode(bool enabled) {
+  prefs.begin("scanrig", false);
+  prefs.putBool("afMode", enabled);
   prefs.end();
 }
 
@@ -374,15 +399,34 @@ static bool triggerCameraHardware() {
     return false;
   }
 
-  if (CAM_FOCUS_PIN >= 0) {
-    digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
-    if (CAM_PREFOCUS_MS > 0) delay(CAM_PREFOCUS_MS);
-  }
-  digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
-  delay(CAM_PRESS_MS);
-  digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
-  if (CAM_FOCUS_PIN >= 0) {
-    digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+  if (gAutoFocusEnabled) {
+    if (CAM_FOCUS_PIN >= 0) {
+      // Nikon-style sequence for AF shutter release:
+      // 1) hold focus, 2) add shutter, 3) release shutter, 4) release focus.
+      digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
+      if (CAM_AF_PREFOCUS_MS > 0) delay(CAM_AF_PREFOCUS_MS);
+      digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
+      delay(CAM_AF_SHUTTER_MS);
+      digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+      if (CAM_AF_POSTFOCUS_MS > 0) delay(CAM_AF_POSTFOCUS_MS);
+      digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+    } else {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus requested but no focus pin -> shutter only\"}");
+      digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
+      delay(CAM_AF_SHUTTER_MS);
+      digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+    }
+  } else {
+    if (CAM_FOCUS_PIN >= 0) {
+      digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
+      if (CAM_PREFOCUS_MS > 0) delay(CAM_PREFOCUS_MS);
+    }
+    digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
+    delay(CAM_PRESS_MS);
+    digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+    if (CAM_FOCUS_PIN >= 0) {
+      digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+    }
   }
   return true;
 }
@@ -705,7 +749,7 @@ static bool bleConnect() {
 
 // ===== Sequencer (same logic as v1) =====
 enum SeqState : uint8_t { SEQ_IDLE=0, SEQ_RUNNING, SEQ_PAUSED };
-enum SeqSub   : uint8_t { SUB_NONE=0, SUB_RECOVER, SUB_RECOVER_WAIT, SUB_ROT_SEEK_WAIT, SUB_TILT_SEND, SUB_TILT_WAIT, SUB_ROT_SEND, SUB_ROT_WAIT, SUB_SETTLE, SUB_SNAP, SUB_COOLDOWN, SUB_DONE };
+enum SeqSub   : uint8_t { SUB_NONE=0, SUB_RECOVER, SUB_RECOVER_WAIT, SUB_ROT_SEEK_WAIT, SUB_TILT_SEND, SUB_TILT_WAIT, SUB_ROT_SEND, SUB_ROT_WAIT, SUB_SETTLE, SUB_SNAP, SUB_COOLDOWN, SUB_DONE, SUB_FLASH_COOLDOWN };
 
 static SeqState gSeqState = SEQ_IDLE;
 static SeqSub   gSub = SUB_NONE;
@@ -723,6 +767,10 @@ static uint32_t gSnapSettleMs = 250;
 static uint32_t gSnapCooldownMs = 500;
 static uint32_t gTiltMoveMs = 8000;
 static uint32_t gTiltReserveMs = 0;
+static bool     gFlashGuardEnabled = true;
+static uint32_t gFlashGuardEveryShots = 200;
+static uint32_t gFlashGuardMs = 300000;
+static uint32_t gFlashGuardUntilMs = 0;
 
 static int gTiltIdx = 0;
 static int gRotIdx  = 0;
@@ -748,6 +796,20 @@ static uint32_t gRecoverStartMs = 0;
 static uint32_t gRecoverResendNextMs = 0;
 static bool gNeedRecoverOnConnect = false;
 static uint32_t gForceDiscNextMs = 0;
+
+static void seqAdvanceAfterShot() {
+  gRotIdx++;
+  if (gRotIdx < gRotSteps) {
+    gSub = SUB_ROT_SEND;
+  } else {
+    gTiltIdx++;
+    if (gTiltIdx < gTiltSteps) {
+      gSub = SUB_TILT_SEND;
+    } else {
+      gSub = SUB_DONE;
+    }
+  }
+}
 static bool gRepeatStep = false;
 static bool gHasResumeAngle = false;
 static float gResumeAngle = 0.0f;
@@ -851,6 +913,7 @@ static void seqResetInternal() {
   gRepeatStep = false;
   gHasResumeAngle = false;
   gSeekAttempts = 0;
+  gFlashGuardUntilMs = 0;
   gNeedPhoneRecoverOnConnect = false;
   gSeqTriggerMode = gTriggerMode;
 
@@ -1339,18 +1402,30 @@ static void seqTick() {
     case SUB_COOLDOWN: {
       if (now - gStateTs >= gSnapCooldownMs) {
         gDoneSteps++;
+        bool useFlashGuard =
+          gFlashGuardEnabled &&
+          (gTriggerMode == TRIGGER_MODE_HW) &&
+          (gFlashGuardEveryShots > 0) &&
+          (gFlashGuardMs > 0) &&
+          (gDoneSteps < gTotalSteps) &&
+          ((gDoneSteps % gFlashGuardEveryShots) == 0);
 
-        gRotIdx++;
-        if (gRotIdx < gRotSteps) {
-          gSub = SUB_ROT_SEND;
+        if (useFlashGuard) {
+          gFlashGuardUntilMs = now + gFlashGuardMs;
+          gSub = SUB_FLASH_COOLDOWN;
+          wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SEQ] FLASH COOLDOWN start (")
+                          + String(gFlashGuardMs / 1000) + " s)\"}");
         } else {
-          gTiltIdx++;
-          if (gTiltIdx < gTiltSteps) {
-            gSub = SUB_TILT_SEND;
-          } else {
-            gSub = SUB_DONE;
-          }
+          seqAdvanceAfterShot();
         }
+      }
+    } break;
+
+    case SUB_FLASH_COOLDOWN: {
+      if ((int32_t)(now - gFlashGuardUntilMs) >= 0) {
+        gFlashGuardUntilMs = 0;
+        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] FLASH COOLDOWN done\"}");
+        seqAdvanceAfterShot();
       }
     } break;
 
@@ -1368,6 +1443,7 @@ static void seqTick() {
 static String buildRigStateJson() {
   String state = (gSeqState == SEQ_IDLE) ? "IDLE" : (gSeqState == SEQ_RUNNING ? "RUNNING" : "PAUSED");
   bool bleNow = gBleConnected;
+  uint32_t nowMs = millis();
 
 
   // STEP formatted as "cur/total"
@@ -1394,6 +1470,20 @@ static String buildRigStateJson() {
   j += "\"UPDATE_URL\":\"" + jsonEscape(String(UPDATE_MANIFEST_URL)) + "\",";
   j += "\"TRIGGER_MODE\":\"" + String(gTriggerMode == TRIGGER_MODE_SMARTPHONE ? "SMARTPHONE" : "HARDWARE") + "\",";
   j += "\"TRIGGER_ENABLED\":\"" + String(gTriggerEnabled ? 1 : 0) + "\",";
+  j += "\"AF_MODE\":\"" + String(gAutoFocusEnabled ? "AUTO" : "MANUAL") + "\",";
+  j += "\"AF_PREFOCUS_MS\":\"" + String(CAM_AF_PREFOCUS_MS) + "\",";
+  j += "\"AF_SHUTTER_MS\":\"" + String(CAM_AF_SHUTTER_MS) + "\",";
+  j += "\"AF_POSTFOCUS_MS\":\"" + String(CAM_AF_POSTFOCUS_MS) + "\",";
+  j += "\"SNAP_PRESS_MS\":\"" + String(CAM_PRESS_MS) + "\",";
+  j += "\"MANUAL_PREFOCUS_MS\":\"" + String(CAM_PREFOCUS_MS) + "\",";
+  j += "\"FLASH_GUARD\":\"" + String(gFlashGuardEnabled ? 1 : 0) + "\",";
+  j += "\"FLASH_GUARD_EVERY\":\"" + String(gFlashGuardEveryShots) + "\",";
+  j += "\"FLASH_GUARD_MS\":\"" + String(gFlashGuardMs) + "\",";
+  uint32_t flashRemainMs = 0;
+  if (gSeqState == SEQ_RUNNING && gSub == SUB_FLASH_COOLDOWN && gFlashGuardUntilMs > nowMs) {
+    flashRemainMs = gFlashGuardUntilMs - nowMs;
+  }
+  j += "\"FLASH_GUARD_REMAIN_MS\":\"" + String(flashRemainMs) + "\",";
   j += "\"PHONE_BT\":\"" + String(gPhoneConnected ? 1 : 0) + "\",";
   j += "\"PHONE_PAIRING\":\"" + String(gPhonePairing ? 1 : 0) + "\",";
   j += "\"PHONE_NAME\":\"" + jsonEscape(String(SMARTPHONE_BT_NAME)) + "\",";
@@ -1473,6 +1563,51 @@ static void setKeyVal(const String& key, const String& val) {
       wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] trigger ")
                       + (gTriggerEnabled ? "ENABLED" : "DISABLED (dry-run)") + "\"}");
     }
+  } else if (key == "AF_MODE") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode change blocked (sequence running)\"}");
+      return;
+    }
+    String mode = val;
+    mode.trim();
+    mode.toUpperCase();
+    bool nextAutoFocus = !(mode == "MANUAL" || mode == "OFF" || mode == "0");
+    if (nextAutoFocus != gAutoFocusEnabled) {
+      gAutoFocusEnabled = nextAutoFocus;
+      saveAutoFocusMode(gAutoFocusEnabled);
+      wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode -> ")
+                      + (gAutoFocusEnabled ? "AUTO" : "MANUAL") + "\"}");
+    }
+  } else if (key == "FLASH_GUARD") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
+      return;
+    }
+    String on = val;
+    on.trim();
+    on.toUpperCase();
+    bool nextEnabled = !(on == "0" || on == "FALSE" || on == "OFF" || on == "NO");
+    if (nextEnabled != gFlashGuardEnabled) {
+      gFlashGuardEnabled = nextEnabled;
+      wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard ")
+                      + (gFlashGuardEnabled ? "ENABLED" : "DISABLED") + "\"}");
+    }
+  } else if (key == "FLASH_GUARD_EVERY") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
+      return;
+    }
+    uint32_t v = (uint32_t)val.toInt();
+    if (v < 1) v = 1;
+    gFlashGuardEveryShots = v;
+  } else if (key == "FLASH_GUARD_MS") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
+      return;
+    }
+    uint32_t v = (uint32_t)val.toInt();
+    if (v < 1000) v = 1000;
+    gFlashGuardMs = v;
   } else if (key == "WIFI_SSID") {
     wifiSsid = val;
     saveWifiCreds(wifiSsid, wifiPass);
@@ -1537,6 +1672,30 @@ static void handleLine(const String& lineIn) {
     wsSendStatus();
     return;
   }
+  if (line == "AF_MODE_AUTO") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode change blocked (sequence running)\"}");
+      wsSendStatus();
+      return;
+    }
+    gAutoFocusEnabled = true;
+    saveAutoFocusMode(gAutoFocusEnabled);
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode -> AUTO\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "AF_MODE_MANUAL") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode change blocked (sequence running)\"}");
+      wsSendStatus();
+      return;
+    }
+    gAutoFocusEnabled = false;
+    saveAutoFocusMode(gAutoFocusEnabled);
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode -> MANUAL\"}");
+    wsSendStatus();
+    return;
+  }
   if (line == "PHONE_PAIR_START") {
     gReqPhonePairStart = true;
     gReqPhonePairStop = false;
@@ -1553,6 +1712,28 @@ static void handleLine(const String& lineIn) {
   }
   if (line == "PHONE_DISCONNECT") {
     phoneDisconnect();
+    wsSendStatus();
+    return;
+  }
+  if (line == "FLASH_GUARD_ON") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
+      wsSendStatus();
+      return;
+    }
+    gFlashGuardEnabled = true;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard ENABLED\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "FLASH_GUARD_OFF") {
+    if (gSeqState == SEQ_RUNNING) {
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
+      wsSendStatus();
+      return;
+    }
+    gFlashGuardEnabled = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard DISABLED\"}");
     wsSendStatus();
     return;
   }
@@ -1698,6 +1879,8 @@ static void printHelpSerial() {
   Serial.println("  TT_LEFT | TT_RIGHT | TT_ROT_ZERO | TT_TILT_UP | TT_TILT_DOWN | TT_TILT_ZERO | TT_STOP");
   Serial.println("  SNAP | SNAP_FOCUS | SNAP_TRIGGER");
   Serial.println("  TRIGGER_ON | TRIGGER_OFF");
+  Serial.println("  AF_MODE_AUTO | AF_MODE_MANUAL");
+  Serial.println("  FLASH_GUARD_ON | FLASH_GUARD_OFF");
   Serial.println("  TRIGGER_MODE_HW | TRIGGER_MODE_SMARTPHONE");
   Serial.println("  PHONE_PAIR_START | PHONE_PAIR_STOP | PHONE_DISCONNECT");
   Serial.println("  SET KEY=VAL            e.g. SET ROT_STEPS=72");
@@ -1877,6 +2060,7 @@ void setup() {
   }
 
   loadTriggerMode();
+  loadAutoFocusMode();
 
   loadWifiCreds();
   wifiStart();
