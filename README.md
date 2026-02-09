@@ -61,7 +61,18 @@ Wi-Fi and static IP can be configured directly in the UI:
 3. Optionally enable static IPv4
 4. Save (or Save + Reboot)
 
-If STA connection is unavailable, the device can fall back to AP mode.
+This is also the intended first-time setup path if your board cannot join your Wi-Fi yet.
+
+AP fallback defaults:
+- SSID: `RealityScanRig3000`
+- Password: `ScanRigPW`
+
+First-time Wi-Fi onboarding via AP fallback:
+1. Connect your phone/laptop to `RealityScanRig3000` (`ScanRigPW`).
+2. Open the rig UI (typically `http://192.168.4.1`).
+3. Go to `Settings` -> `Network`.
+4. Enter your home/lab Wi-Fi credentials and save.
+5. Reconnect to the rig on your normal network (`scanrig.local` or router IP).
 
 ## Privacy and Credentials
 

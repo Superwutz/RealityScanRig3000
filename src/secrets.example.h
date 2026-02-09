@@ -10,7 +10,7 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 
 // AP fallback
 #define SCANRIG_AP_SSID "RealityScanRig3000"
-#define SCANRIG_AP_PASS "change-me-ap-pass"
+#define SCANRIG_AP_PASS "ScanRigPW"
 
 // Default STA profile (used when NVS has no saved credentials yet)
 #define SCANRIG_FIRM_SSID "CHANGE_ME_WIFI_SSID"
