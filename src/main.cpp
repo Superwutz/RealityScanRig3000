@@ -265,6 +265,58 @@ static String jsonEscape(const String& s) {
   return out;
 }
 
+static String getPostParam(AsyncWebServerRequest* req, const char* key, const String& def = "") {
+  if (!req->hasParam(key, true)) return def;
+  const AsyncWebParameter* p = req->getParam(key, true);
+  if (!p) return def;
+  return p->value();
+}
+
+static bool parseBoolParam(const String& v) {
+  String s = v;
+  s.trim();
+  s.toLowerCase();
+  return (s == "1" || s == "true" || s == "on" || s == "yes");
+}
+
+static String currentIpText() {
+  if (WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED) {
+    return WiFi.localIP().toString();
+  }
+  if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
+    return WiFi.softAPIP().toString();
+  }
+  return "0.0.0.0";
+}
+
+static String buildNetworkConfigJson(const String& msg = "") {
+  String j = "{";
+  j += "\"ok\":true,";
+  j += "\"ssid\":\"" + jsonEscape(wifiSsid) + "\",";
+  j += "\"passSet\":" + String(wifiPass.length() ? 1 : 0) + ",";
+  j += "\"useStatic\":" + String(wifiUseStatic ? 1 : 0) + ",";
+  j += "\"ip\":\"" + jsonEscape(wifiIpStr) + "\",";
+  j += "\"gw\":\"" + jsonEscape(wifiGwStr) + "\",";
+  j += "\"dns\":\"" + jsonEscape(wifiDnsStr) + "\",";
+  j += "\"mask\":\"" + jsonEscape(wifiMaskStr) + "\",";
+  j += "\"mdns\":\"" + jsonEscape(String(MDNS_NAME)) + "\",";
+  j += "\"currentIp\":\"" + jsonEscape(currentIpText()) + "\"";
+  if (msg.length()) {
+    j += ",\"msg\":\"" + jsonEscape(msg) + "\"";
+  }
+  j += "}";
+  return j;
+}
+
+static bool validateStaticConfig(const String& ip, const String& gw, const String& dns, const String& mask, String& err) {
+  IPAddress a, b, c, d;
+  if (!parseIP(ip, a))   { err = "invalid static IP"; return false; }
+  if (!parseIP(gw, b))   { err = "invalid gateway IP"; return false; }
+  if (!parseIP(dns, c))  { err = "invalid DNS IP"; return false; }
+  if (!parseIP(mask, d)) { err = "invalid subnet mask"; return false; }
+  return true;
+}
+
 static inline uint8_t camIdleLevel() { return CAM_ACTIVE_LOW ? HIGH : LOW; }
 static inline uint8_t camActiveLevel() { return CAM_ACTIVE_LOW ? LOW : HIGH; }
 
@@ -1767,6 +1819,70 @@ void setup() {
   });
   server.on("/app.js", HTTP_GET, [](AsyncWebServerRequest* req) {
     req->send(200, "application/javascript; charset=utf-8", APP_JS, APP_JS_LEN);
+  });
+  server.on("/api/network", HTTP_GET, [](AsyncWebServerRequest* req) {
+    req->send(200, "application/json; charset=utf-8", buildNetworkConfigJson());
+  });
+  server.on("/api/network", HTTP_POST, [](AsyncWebServerRequest* req) {
+    String ssid = getPostParam(req, "ssid", wifiSsid);
+    ssid.trim();
+    if (!ssid.length()) {
+      req->send(400, "application/json; charset=utf-8",
+                "{\"ok\":false,\"msg\":\"SSID is required\"}");
+      return;
+    }
+
+    String pass = getPostParam(req, "pass", "");
+    bool passProvided = parseBoolParam(getPostParam(req, "passProvided", "0"));
+    bool useStatic = parseBoolParam(getPostParam(req, "useStatic", "0"));
+    bool reboot = parseBoolParam(getPostParam(req, "reboot", "0"));
+
+    String ip = getPostParam(req, "ip", "");
+    String gw = getPostParam(req, "gw", "");
+    String dns = getPostParam(req, "dns", "");
+    String mask = getPostParam(req, "mask", "");
+    ip.trim();
+    gw.trim();
+    dns.trim();
+    mask.trim();
+
+    if (useStatic) {
+      String err;
+      if (!validateStaticConfig(ip, gw, dns, mask, err)) {
+        String body = String("{\"ok\":false,\"msg\":\"") + jsonEscape(err) + "\"}";
+        req->send(400, "application/json; charset=utf-8", body);
+        return;
+      }
+    } else {
+      ip = "";
+      gw = "";
+      dns = "";
+      mask = "";
+    }
+
+    wifiSsid = ssid;
+    if (passProvided) {
+      wifiPass = pass;
+    }
+    wifiUseStatic = useStatic;
+    wifiIpStr = ip;
+    wifiGwStr = gw;
+    wifiDnsStr = dns;
+    wifiMaskStr = mask;
+
+    saveWifiCreds(wifiSsid, wifiPass);
+    saveWifiStatic(wifiUseStatic, wifiIpStr, wifiGwStr, wifiDnsStr, wifiMaskStr);
+
+    String msg = reboot
+      ? "network config saved; rebooting"
+      : "network config saved (reboot to apply)";
+    req->send(200, "application/json; charset=utf-8", buildNetworkConfigJson(msg));
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[NET] ") + jsonEscape(msg) + "\"}");
+
+    if (reboot) {
+      delay(250);
+      ESP.restart();
+    }
   });
   server.on("/api/update", HTTP_POST,
     [](AsyncWebServerRequest* req) {
