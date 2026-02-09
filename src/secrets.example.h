@@ -28,11 +28,24 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 // https://superwutz.github.io/RealityScanRig3000/manifest.json
 #define SCANRIG_UPDATE_MANIFEST_URL "https://superwutz.github.io/RealityScanRig3000/manifest.json"
 
-// Camera trigger hardware (optocoupler output pins on ESP32-S3).
+// Camera trigger hardware (relay input control pins on ESP32-S3).
 // Set to -1 to disable a pin.
-#define SCANRIG_CAM_FOCUS_PIN -1
-#define SCANRIG_CAM_SHUTTER_PIN -1
-#define SCANRIG_CAM_ACTIVE_LOW 1
+//
+// Typical relay-board setup:
+// - 2x single-channel relay modules (one for focus, one for shutter)
+// - IN pin driven by ESP32 GPIO
+// - Active level usually LOW on these modules -> keep ACTIVE_LOW = 1
+//
+// Camera cable mapping used by this project:
+// - white = GND
+// - black = focus
+// - red   = trigger
+// Suggested starter pins (ESP32-S3 DevKitC):
+// - Focus relay IN  -> GPIO16
+// - Trigger relay IN -> GPIO17
+#define SCANRIG_CAM_FOCUS_PIN 16
+#define SCANRIG_CAM_SHUTTER_PIN 17
+#define SCANRIG_CAM_ACTIVE_LOW 0
 #define SCANRIG_CAM_PRESS_MS 120
 #define SCANRIG_CAM_PREFOCUS_MS 0
 

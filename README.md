@@ -74,6 +74,43 @@ First-time Wi-Fi onboarding via AP fallback:
 4. Enter your home/lab Wi-Fi credentials and save.
 5. Reconnect to the rig on your normal network (`scanrig.local` or router IP).
 
+## Hardware Camera Trigger (Relay)
+
+The recommended hardware trigger path is relay-based.
+
+Camera-side wire mapping (confirmed):
+- White: `GND`
+- Black: `FOCUS`
+- Red: `TRIGGER`
+
+Recommended relay wiring:
+1. Use two relay channels (or two single-channel relay boards):
+   - Relay A = focus
+   - Relay B = trigger
+2. ESP32 side:
+   - Board `IN` pins -> ESP32 trigger GPIOs
+   - Board `VCC`/`GND` -> suitable relay supply
+   - If your board supports low-level trigger, use active-low logic
+3. Camera-side contact wiring:
+   - Camera `white (GND)` -> `COM` on both relays
+   - Camera `black (FOCUS)` -> `NO` on focus relay
+   - Camera `red (TRIGGER)` -> `NO` on trigger relay
+   - Leave `NC` unused
+
+Firmware configuration:
+- Set trigger pins in `src/secrets.local.h`:
+  - `SCANRIG_CAM_FOCUS_PIN`
+  - `SCANRIG_CAM_SHUTTER_PIN`
+- Keep `SCANRIG_CAM_ACTIVE_LOW 1` for typical low-level-trigger relay modules.
+- Tune timings if needed:
+  - `SCANRIG_CAM_PREFOCUS_MS`
+  - `SCANRIG_CAM_PRESS_MS`
+
+Quick hardware tests (before full scan):
+- `SNAP_FOCUS` -> toggles focus relay only
+- `SNAP_TRIGGER` -> toggles trigger relay only
+- `SNAP` -> full shutter event (focus + trigger sequence in hardware mode)
+
 ## Privacy and Credentials
 
 Do not commit real credentials.

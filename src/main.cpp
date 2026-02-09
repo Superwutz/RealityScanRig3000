@@ -382,6 +382,28 @@ static bool triggerCameraHardware() {
   return true;
 }
 
+static bool triggerCameraHardwareFocusOnly() {
+  if (CAM_FOCUS_PIN < 0) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] focus trigger disabled (no focus pin)\"}");
+    return false;
+  }
+  digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
+  delay(CAM_PRESS_MS);
+  digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+  return true;
+}
+
+static bool triggerCameraHardwareShutterOnly() {
+  if (CAM_SHUTTER_PIN < 0) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] shutter trigger disabled (no shutter pin)\"}");
+    return false;
+  }
+  digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
+  delay(CAM_PRESS_MS);
+  digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+  return true;
+}
+
 static void phonePairingStart() {
   if (!gPhoneServer || !gPhoneServer->getAdvertising()) return;
   bleDisconnect();
@@ -1459,6 +1481,22 @@ static void handleLine(const String& lineIn) {
     wsSendStatus();
     return;
   }
+  if (line == "SNAP_FOCUS") {
+    wsBroadcastJson("{\"type\":\"rigLine\",\"line\":\"SNAP_FOCUS\"}");
+    bool ok = triggerCameraHardwareFocusOnly();
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] focus ")
+                    + (ok ? "OK" : "FAIL") + "\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "SNAP_TRIGGER") {
+    wsBroadcastJson("{\"type\":\"rigLine\",\"line\":\"SNAP_TRIGGER\"}");
+    bool ok = triggerCameraHardwareShutterOnly();
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] trigger ")
+                    + (ok ? "OK" : "FAIL") + "\"}");
+    wsSendStatus();
+    return;
+  }
   if (line == "PHONE_PAIR_START") {
     gReqPhonePairStart = true;
     gReqPhonePairStop = false;
@@ -1618,7 +1656,7 @@ static void printHelpSerial() {
   Serial.println("  BLE_DISCONNECT");
   Serial.println("  STATUS | START | PAUSE | RESUME | ABORT | RESET");
   Serial.println("  TT_LEFT | TT_RIGHT | TT_ROT_ZERO | TT_TILT_UP | TT_TILT_DOWN | TT_TILT_ZERO | TT_STOP");
-  Serial.println("  SNAP                   (manual camera trigger event)");
+  Serial.println("  SNAP | SNAP_FOCUS | SNAP_TRIGGER");
   Serial.println("  TRIGGER_MODE_HW | TRIGGER_MODE_SMARTPHONE");
   Serial.println("  PHONE_PAIR_START | PHONE_PAIR_STOP | PHONE_DISCONNECT");
   Serial.println("  SET KEY=VAL            e.g. SET ROT_STEPS=72");
