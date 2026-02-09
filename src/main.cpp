@@ -18,10 +18,10 @@
 #endif
 
 #ifndef SCANRIG_FW_VERSION
-#define SCANRIG_FW_VERSION "0.4.3"
+#define SCANRIG_FW_VERSION "0.5.0"
 #endif
 #ifndef SCANRIG_UI_VERSION
-#define SCANRIG_UI_VERSION "0.4.3"
+#define SCANRIG_UI_VERSION "0.5.0"
 #endif
 #ifndef SCANRIG_UPDATE_MANIFEST_URL
 #define SCANRIG_UPDATE_MANIFEST_URL ""
@@ -46,7 +46,7 @@
 #endif
 
 /*
-RealityScanRig3000 â€“ ESP32-S3: UI (WebSocket) + BLE Turntable + Sequencer (v1)
+RealityScanRig3000 Ã¢â‚¬â€œ ESP32-S3: UI (WebSocket) + BLE Turntable + Sequencer (v1)
 
 Goal:
 - Serve the existing UI 1:1 from the ESP32 (HTML/CSS/JS embedded)
