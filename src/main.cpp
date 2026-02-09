@@ -109,6 +109,7 @@ enum TriggerMode : uint8_t {
 };
 static TriggerMode gTriggerMode = TRIGGER_MODE_HW;
 static TriggerMode gSeqTriggerMode = TRIGGER_MODE_HW;
+static bool gTriggerEnabled = true;
 
 static NimBLEServer* gPhoneServer = nullptr;
 static NimBLEHIDDevice* gPhoneHid = nullptr;
@@ -364,6 +365,10 @@ class PhoneHidServerCallbacks : public NimBLEServerCallbacks {
 static PhoneHidServerCallbacks gPhoneHidCbs;
 
 static bool triggerCameraHardware() {
+  if (!gTriggerEnabled) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] skipped (dry-run enabled)\"}");
+    return true;
+  }
   if (CAM_SHUTTER_PIN < 0) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] hardware trigger disabled (no shutter pin)\"}");
     return false;
@@ -383,6 +388,10 @@ static bool triggerCameraHardware() {
 }
 
 static bool triggerCameraHardwareFocusOnly() {
+  if (!gTriggerEnabled) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] focus skipped (dry-run enabled)\"}");
+    return true;
+  }
   if (CAM_FOCUS_PIN < 0) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] focus trigger disabled (no focus pin)\"}");
     return false;
@@ -394,6 +403,10 @@ static bool triggerCameraHardwareFocusOnly() {
 }
 
 static bool triggerCameraHardwareShutterOnly() {
+  if (!gTriggerEnabled) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger skipped (dry-run enabled)\"}");
+    return true;
+  }
   if (CAM_SHUTTER_PIN < 0) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] shutter trigger disabled (no shutter pin)\"}");
     return false;
@@ -451,6 +464,10 @@ static void phoneDisableForHardwareMode() {
 }
 
 static bool triggerCameraSmartphone() {
+  if (!gTriggerEnabled) {
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] skipped (dry-run enabled)\"}");
+    return true;
+  }
   if (!gPhoneConnected || !gPhoneInput) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] smartphone trigger unavailable (not connected)\"}");
     return false;
@@ -1376,6 +1393,7 @@ static String buildRigStateJson() {
   j += "\"UI_VER\":\"" + String(UI_VERSION) + "\",";
   j += "\"UPDATE_URL\":\"" + jsonEscape(String(UPDATE_MANIFEST_URL)) + "\",";
   j += "\"TRIGGER_MODE\":\"" + String(gTriggerMode == TRIGGER_MODE_SMARTPHONE ? "SMARTPHONE" : "HARDWARE") + "\",";
+  j += "\"TRIGGER_ENABLED\":\"" + String(gTriggerEnabled ? 1 : 0) + "\",";
   j += "\"PHONE_BT\":\"" + String(gPhoneConnected ? 1 : 0) + "\",";
   j += "\"PHONE_PAIRING\":\"" + String(gPhonePairing ? 1 : 0) + "\",";
   j += "\"PHONE_NAME\":\"" + jsonEscape(String(SMARTPHONE_BT_NAME)) + "\",";
@@ -1445,6 +1463,16 @@ static void setKeyVal(const String& key, const String& val) {
       wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] mode -> ")
                       + (gTriggerMode == TRIGGER_MODE_SMARTPHONE ? "SMARTPHONE" : "HARDWARE") + "\"}");
     }
+  } else if (key == "TRIGGER_ENABLED") {
+    String on = val;
+    on.trim();
+    on.toUpperCase();
+    bool nextEnabled = !(on == "0" || on == "FALSE" || on == "OFF" || on == "NO");
+    if (nextEnabled != gTriggerEnabled) {
+      gTriggerEnabled = nextEnabled;
+      wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] trigger ")
+                      + (gTriggerEnabled ? "ENABLED" : "DISABLED (dry-run)") + "\"}");
+    }
   } else if (key == "WIFI_SSID") {
     wifiSsid = val;
     saveWifiCreds(wifiSsid, wifiPass);
@@ -1494,6 +1522,18 @@ static void handleLine(const String& lineIn) {
     bool ok = triggerCameraHardwareShutterOnly();
     wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] trigger ")
                     + (ok ? "OK" : "FAIL") + "\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "TRIGGER_ON") {
+    gTriggerEnabled = true;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger ENABLED\"}");
+    wsSendStatus();
+    return;
+  }
+  if (line == "TRIGGER_OFF") {
+    gTriggerEnabled = false;
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger DISABLED (dry-run)\"}");
     wsSendStatus();
     return;
   }
@@ -1657,6 +1697,7 @@ static void printHelpSerial() {
   Serial.println("  STATUS | START | PAUSE | RESUME | ABORT | RESET");
   Serial.println("  TT_LEFT | TT_RIGHT | TT_ROT_ZERO | TT_TILT_UP | TT_TILT_DOWN | TT_TILT_ZERO | TT_STOP");
   Serial.println("  SNAP | SNAP_FOCUS | SNAP_TRIGGER");
+  Serial.println("  TRIGGER_ON | TRIGGER_OFF");
   Serial.println("  TRIGGER_MODE_HW | TRIGGER_MODE_SMARTPHONE");
   Serial.println("  PHONE_PAIR_START | PHONE_PAIR_STOP | PHONE_DISCONNECT");
   Serial.println("  SET KEY=VAL            e.g. SET ROT_STEPS=72");
