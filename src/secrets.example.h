@@ -48,6 +48,9 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 #define SCANRIG_CAM_ACTIVE_LOW 0
 #define SCANRIG_CAM_PRESS_MS 120
 #define SCANRIG_CAM_PREFOCUS_MS 0
+#define SCANRIG_CAM_AF_PREFOCUS_MS 450
+#define SCANRIG_CAM_AF_SHUTTER_MS 180
+#define SCANRIG_CAM_AF_POSTFOCUS_MS 80
 
 // Smartphone Bluetooth shutter profile name (BLE HID peripheral).
 #define SCANRIG_SMARTPHONE_BT_NAME "RealityScanRig3000 Remote"
