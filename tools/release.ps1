@@ -103,7 +103,8 @@ if ($Commit) {
 }
 
 if ($Tag) {
-  $existingTag = (git -C $repoRoot tag -l $Version).Trim()
+  $existingTag = [string](git -C $repoRoot tag -l $Version)
+  $existingTag = $existingTag.Trim()
   if ($existingTag) {
     throw "Tag already exists: $Version"
   }
