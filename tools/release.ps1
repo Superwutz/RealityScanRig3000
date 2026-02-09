@@ -16,6 +16,19 @@ $stageScript = Join-Path $PSScriptRoot "stage-web-installer.ps1"
 $mainCpp = Join-Path $repoRoot "src/main.cpp"
 $docsDir = Join-Path $repoRoot "docs"
 
+function Get-GitText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Args
+  )
+  $lines = & git -C $repoRoot @Args
+  if ($null -eq $lines) { return "" }
+  if ($lines -is [System.Array]) {
+    return (($lines -join "`n").Trim())
+  }
+  return ([string]$lines).Trim()
+}
+
 if (-not (Test-Path $stageScript)) {
   throw "Missing script: $stageScript"
 }
@@ -29,14 +42,12 @@ if ($Push -and (-not $Commit -or -not $Tag)) {
   throw "-Push requires -Commit and -Tag."
 }
 
-$branch = [string](git -C $repoRoot rev-parse --abbrev-ref HEAD)
-$branch = $branch.Trim()
+$branch = Get-GitText @("rev-parse", "--abbrev-ref", "HEAD")
 if ($branch -ne "main") {
   throw "Release must run from 'main'. Current branch: $branch"
 }
 
-$worktreeState = [string](git -C $repoRoot status --porcelain)
-$worktreeState = $worktreeState.Trim()
+$worktreeState = Get-GitText @("status", "--porcelain")
 if ($worktreeState) {
   throw "Working tree must be clean before release."
 }
@@ -103,8 +114,7 @@ if ($Commit) {
 }
 
 if ($Tag) {
-  $existingTag = [string](git -C $repoRoot tag -l $Version)
-  $existingTag = $existingTag.Trim()
+  $existingTag = Get-GitText @("tag", "-l", $Version)
   if ($existingTag) {
     throw "Tag already exists: $Version"
   }
