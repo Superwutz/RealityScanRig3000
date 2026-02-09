@@ -1,0 +1,116 @@
+param(
+  [Parameter(Mandatory = $true)]
+  [ValidatePattern("^v\d+\.\d+\.\d+$")]
+  [string]$Version,
+  [string]$EnvName = "esp32s3",
+  [string]$StageRoot = ".staging/web-installer",
+  [switch]$Commit,
+  [switch]$Tag,
+  [switch]$Push
+)
+
+$ErrorActionPreference = "Stop"
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$stageScript = Join-Path $PSScriptRoot "stage-web-installer.ps1"
+$mainCpp = Join-Path $repoRoot "src/main.cpp"
+$docsDir = Join-Path $repoRoot "docs"
+
+if (-not (Test-Path $stageScript)) {
+  throw "Missing script: $stageScript"
+}
+if (-not (Test-Path $mainCpp)) {
+  throw "Missing file: $mainCpp"
+}
+if (-not (Test-Path $docsDir)) {
+  throw "Missing docs directory: $docsDir"
+}
+if ($Push -and (-not $Commit -or -not $Tag)) {
+  throw "-Push requires -Commit and -Tag."
+}
+
+$branch = (git -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
+if ($branch -ne "main") {
+  throw "Release must run from 'main'. Current branch: $branch"
+}
+
+$worktreeState = (git -C $repoRoot status --porcelain).Trim()
+if ($worktreeState) {
+  throw "Working tree must be clean before release."
+}
+
+$manifestPath = Join-Path $docsDir "manifest.json"
+$manifestBefore = Get-Content -Raw $manifestPath | ConvertFrom-Json
+$currentVersion = [version]($manifestBefore.version.TrimStart("v"))
+$nextVersion = [version]($Version.TrimStart("v"))
+if ($nextVersion -le $currentVersion) {
+  throw "Version must be greater than docs/manifest.json version ($($manifestBefore.version))."
+}
+
+$plainVersion = $Version.TrimStart("v")
+$mainCppRaw = Get-Content -Raw $mainCpp
+$mainCppRaw = [regex]::Replace(
+  $mainCppRaw,
+  '(#define\s+SCANRIG_FW_VERSION\s+")([^"]+)(")',
+  "`${1}$plainVersion`${3}",
+  1
+)
+$mainCppRaw = [regex]::Replace(
+  $mainCppRaw,
+  '(#define\s+SCANRIG_UI_VERSION\s+")([^"]+)(")',
+  "`${1}$plainVersion`${3}",
+  1
+)
+[System.IO.File]::WriteAllText($mainCpp, $mainCppRaw, (New-Object System.Text.UTF8Encoding($false)))
+
+powershell -ExecutionPolicy Bypass -File $stageScript -EnvName $EnvName -Version $Version -StageRoot $StageRoot
+
+$stageDir = Join-Path $repoRoot (Join-Path $StageRoot $Version)
+$releaseFiles = @(
+  "bootloader.bin",
+  "partitions.bin",
+  "boot_app0.bin",
+  "firmware.bin",
+  "manifest.json",
+  "index.html"
+)
+foreach ($name in $releaseFiles) {
+  $src = Join-Path $stageDir $name
+  $dst = Join-Path $docsDir $name
+  if (-not (Test-Path $src)) {
+    throw "Missing generated release file: $src"
+  }
+  Copy-Item $src $dst -Force
+}
+
+$manifestAfter = Get-Content -Raw $manifestPath | ConvertFrom-Json
+if ($manifestAfter.version -ne $Version) {
+  throw "Manifest version mismatch after export. Expected $Version, found $($manifestAfter.version)."
+}
+
+Write-Output "Release files prepared for $Version."
+Write-Output "Updated:"
+foreach ($name in @("src/main.cpp", "docs/manifest.json", "docs/index.html", "docs/bootloader.bin", "docs/partitions.bin", "docs/boot_app0.bin", "docs/firmware.bin")) {
+  Write-Output "  $name"
+}
+
+if ($Commit) {
+  git -C $repoRoot add -- src/main.cpp docs/manifest.json docs/index.html docs/bootloader.bin docs/partitions.bin docs/boot_app0.bin docs/firmware.bin
+  git -C $repoRoot commit -m "release: $Version"
+  Write-Output "Created commit: release: $Version"
+}
+
+if ($Tag) {
+  $existingTag = (git -C $repoRoot tag -l $Version).Trim()
+  if ($existingTag) {
+    throw "Tag already exists: $Version"
+  }
+  git -C $repoRoot tag -a $Version -m "Release $Version"
+  Write-Output "Created tag: $Version"
+}
+
+if ($Push) {
+  git -C $repoRoot push origin main
+  git -C $repoRoot push origin $Version
+  Write-Output "Pushed main and tag $Version to origin."
+}

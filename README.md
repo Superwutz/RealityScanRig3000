@@ -88,30 +88,9 @@ Default OTA manifest endpoint in firmware:
 
 If you need a custom endpoint, override `SCANRIG_UPDATE_MANIFEST_URL` in `src/secrets.local.h`.
 
+Release policy and commands are documented in `RELEASE.md`.
+
 ---
-
-## Local Staging Test (Manifest + Installer)
-
-If rig UI runs on another origin (for example `http://scanrig.local`) and manifest is served from `localhost`, your local server must allow CORS.
-
-Example (PowerShell):
-
-```powershell
-cd .\.staging\web-installer\v0.4.2
-@'
-import http.server, socketserver
-class H(http.server.SimpleHTTPRequestHandler):
-    def end_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        super().end_headers()
-socketserver.TCPServer.allow_reuse_address = True
-socketserver.TCPServer(("", 8000), H).serve_forever()
-'@ | & "C:\Users\user\.platformio\python3\python.exe" -
-```
-
-Then use:
-- `http://localhost:8000`
-- manifest URL: `http://localhost:8000/manifest.json`
 
 ---
 
