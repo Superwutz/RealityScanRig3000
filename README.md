@@ -1,162 +1,101 @@
 # RealityScanRig3000
 
-**RealityScanRig3000** is an ESP32-S3 powered scanning rig controller for automated photogrammetry capture workflows.
+RealityScanRig3000 is an ESP32-S3 firmware + web UI for automated dual-axis photogrammetry capture.
 
-Created and maintained by **Superwutz**.
+The project is designed for end users first:
+- Install from a website over USB
+- Run and configure from a browser UI
+- Update firmware from the UI (OTA)
 
-This project was built **largely in collaboration with AI** (design, coding, refactoring, and documentation), with human validation and iterative testing.
+No IDE is required for normal installation and updates.
 
----
+## Main Features
 
-## What This Project Does
+- Browser-based control UI hosted by the ESP32
+- Dual-axis sequence engine (rotation + tilt)
+- Preset-driven scan profiles
+- Live status, progress, and error indicators
+- Manual motion controls
+- OTA update flow from the Settings screen
+- Web installer for first-time flashing
 
-RealityScanRig3000 controls a dual-axis turntable and camera trigger workflow through a browser-based UI:
+## Supported Hardware
 
-- Rotation + tilt scan sequencing
-- Preset-based scan profiles
-- Live status, progress, and segment visualization
-- Manual axis controls
-- BLE auto-recovery during scan interruptions
-- OTA firmware update directly from the UI
+- ESP32-S3 board (`esp32-s3-devkitc-1` target)
+- Revopoint Dual-axis Turntable
 
-The goal is practical, repeatable, low-friction scanning for end users without requiring a full embedded toolchain.
+## Quick Start (End Users)
 
-Primary target hardware:
-- **Revopoint Dual-axis Turntable**  
-  https://www.revopoint3d.com/products/dual-axis-turntable
+1. Open the installer page in desktop Chrome or Edge:  
+   `https://superwutz.github.io/RealityScanRig3000/`
+2. Connect your ESP32 board by USB.
+3. Click `Install` and choose the serial device.
+4. Wait for flash + reboot.
+5. Open the rig UI at:
+   - `http://scanrig.local`
+   - or the IP shown by your router
 
----
+## Firmware Updates (OTA)
 
-## Key Features
+After initial USB install, updates are done directly in the UI:
 
-- **Browser UI on device** (ESP32 serves HTML/CSS/JS itself)
-- **Dual-axis scan sequencer** with tilt/rotation step logic
-- **Live progress views**:
-  - top-down rotation ring
-  - side-view tilt arc
-  - compressed full-sequence bar
-- **Error segment marking** in progress views (BLE/TCP/WiFi issues)
-- **Manual control block** (rotation/tilt/zero/stop/snap)
-- **BLE auto-connect + heartbeat + recover**
-- **OTA update endpoint** (`/api/update`)
-- **Web-installer export flow** for non-technical end users
+1. Open the rig UI.
+2. Go to `Settings` -> `Firmware Update`.
+3. Click `Check Updates`.
+4. If a newer release is available, click `Update Now`.
 
----
+The board reboots automatically after a successful update.
 
-## Hardware + Software Stack
+You can also upload a local firmware file via `Upload Firmware (.bin)`.
 
-- **MCU**: ESP32-S3 (`esp32-s3-devkitc-1` target)
-- **Framework**: Arduino (PlatformIO)
-- **BLE**: NimBLE-Arduino
-- **Web server**: ESPAsyncWebServer + AsyncTCP
-- **Frontend**: Embedded static assets in firmware (`src/web_assets.h`)
-
----
-
-## End User Quick Start (No IDE)
-
-### 1) Install via browser (USB)
-
-Use the official installer page:
-
-https://superwutz.github.io/RealityScanRig3000/
-
-User flow:
-1. Open the installer page in Chrome or Edge (desktop).
-2. Connect your ESP32 board with a USB data cable.
-3. Click `Install` and select the board's serial device.
-4. Wait until flashing finishes and the board reboots.
-5. Open rig UI at `http://scanrig.local` (or router-assigned DHCP IP).
-
----
-
-## OTA Updates (From Rig UI)
-
-After first install, updates can be done from the UI:
-
-1. Open rig UI
-2. Console section:
-   - `Check Updates` (manifest-based)
-   - `Update Now` (downloads `firmware.bin` and uploads OTA)
-3. Device reboots automatically after successful update
-
-You can still upload a local `.bin` manually via `Upload Firmware (.bin)`.
-
-Default OTA manifest endpoint in firmware:
+Default update manifest URL:
 
 `https://superwutz.github.io/RealityScanRig3000/manifest.json`
 
-If you need a custom endpoint, override `SCANRIG_UPDATE_MANIFEST_URL` in `src/secrets.local.h`.
+## Network Configuration (No IDE)
 
-Release policy and commands are documented in `RELEASE.md`.
+Wi-Fi and static IP can be configured directly in the UI:
 
----
+1. Open `Settings` -> `Network`
+2. Enter SSID/password
+3. Optionally enable static IPv4
+4. Save (or Save + Reboot)
 
----
+If STA connection is unavailable, the device can fall back to AP mode.
 
-## WiFi + Secrets
+## Privacy and Credentials
 
-Do **not** commit real credentials.
+Do not commit real credentials.
 
-Use:
-- `src/secrets.example.h` (placeholders, tracked)
-- `src/secrets.local.h` (real values, ignored)
+- `src/secrets.example.h` is tracked and contains placeholders.
+- `src/secrets.local.h` is ignored and intended for private values.
 
----
+## Developer Notes
 
-## Technical Notes
+For release workflow details, see `RELEASE.md`.
 
-- Core firmware lives in `src/main.cpp`
-- Embedded UI lives in:
-  - source workspace: `.tmp_ui/`
-  - compiled/embedded form: `src/web_assets.h`
-- UI and firmware communicate via WebSocket (`/`) using compact JSON messages
-- Sequencer state machine handles:
-  - tilt send/wait
-  - rotate send/wait
-  - settle/snap/cooldown
-  - recover on disconnect
+Core files:
+- Firmware: `src/main.cpp`
+- Embedded web assets: `src/web_assets.h`
+- Web installer template: `deploy/web-installer/index.html`
+- Published installer/OTA artifacts: `docs/`
 
----
+## Security Reporting
 
-## Disclaimers
+Please report security issues privately first.
 
-### Safety + Liability
+See `SECURITY.md` for disclosure instructions.
 
-This project is provided **as-is**, without warranty of any kind.  
-Use at your own risk.
+## Safety Disclaimer
+
+This project is provided as-is and without warranty.
 
 You are responsible for:
-- safe electrical wiring
-- safe operation around moving hardware
-- protecting camera and rig equipment
-- validating all firmware behavior before production use
-
-Neither **Superwutz** nor contributors are liable for equipment damage, data loss, injury, or any consequential damages.
-
-### Compliance
-
-You are responsible for complying with local laws and regulations regarding:
-- electronics operation
-- radio/BLE usage
-- photography and data capture
-
-### Professional Use
-
-This is not a certified industrial safety controller.  
-Do not use it where hardware failure can create safety-critical outcomes.
-
----
-
-## Credits
-
-- Project lead: **Superwutz**
-- Built largely with AI-assisted development workflows
-- Open-source libraries: NimBLE-Arduino, ESPAsyncWebServer, AsyncTCP, PlatformIO ecosystem
-
----
+- Safe electrical wiring
+- Safe operation around moving hardware
+- Validation before production use
+- Compliance with local regulations
 
 ## License
 
-This project is licensed under the **MIT License**.  
-See `LICENSE` for the full text.
+MIT License. See `LICENSE`.

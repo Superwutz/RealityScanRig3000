@@ -16,6 +16,8 @@
 *.log
 *.err
 .env
+Thumbs.db
+.DS_Store
 
 # Local extracted UI assets (generated from src/web_assets.h)
 /app.js
