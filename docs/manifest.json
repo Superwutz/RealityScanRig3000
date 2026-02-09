@@ -1,6 +1,6 @@
 {
   "name": "RealityScanRig3000",
-  "version": "v0.4.2",
+  "version": "v0.4.3",
   "new_install_prompt_erase": true,
   "builds": [
     {
