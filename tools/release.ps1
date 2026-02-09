@@ -29,12 +29,14 @@ if ($Push -and (-not $Commit -or -not $Tag)) {
   throw "-Push requires -Commit and -Tag."
 }
 
-$branch = (git -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
+$branch = [string](git -C $repoRoot rev-parse --abbrev-ref HEAD)
+$branch = $branch.Trim()
 if ($branch -ne "main") {
   throw "Release must run from 'main'. Current branch: $branch"
 }
 
-$worktreeState = (git -C $repoRoot status --porcelain).Trim()
+$worktreeState = [string](git -C $repoRoot status --porcelain)
+$worktreeState = $worktreeState.Trim()
 if ($worktreeState) {
   throw "Working tree must be clean before release."
 }
