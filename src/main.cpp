@@ -44,6 +44,22 @@
 #ifndef SCANRIG_CAM_PREFOCUS_MS
 #define SCANRIG_CAM_PREFOCUS_MS 0
 #endif
+#ifndef SCANRIG_STATUS_LED_ENABLE
+#define SCANRIG_STATUS_LED_ENABLE 1
+#endif
+#ifndef SCANRIG_STATUS_LED_PIN
+#ifdef RGB_BUILTIN
+#define SCANRIG_STATUS_LED_PIN RGB_BUILTIN
+#else
+#define SCANRIG_STATUS_LED_PIN 48
+#endif
+#endif
+#ifndef SCANRIG_STATUS_LED_BRIGHTNESS
+#define SCANRIG_STATUS_LED_BRIGHTNESS 28
+#endif
+#ifndef SCANRIG_BUILD_GIT
+#define SCANRIG_BUILD_GIT "dev"
+#endif
 #ifndef SCANRIG_CAM_AF_PREFOCUS_MS
 #define SCANRIG_CAM_AF_PREFOCUS_MS 450
 #endif
@@ -111,6 +127,54 @@ static const int CAM_SHUTTER_PIN = SCANRIG_CAM_SHUTTER_PIN;
 static const bool CAM_ACTIVE_LOW = (SCANRIG_CAM_ACTIVE_LOW != 0);
 static const uint32_t CAM_PRESS_MS = SCANRIG_CAM_PRESS_MS;
 static const uint32_t CAM_PREFOCUS_MS = SCANRIG_CAM_PREFOCUS_MS;
+static const bool STATUS_LED_ENABLE_DEFAULT = (SCANRIG_STATUS_LED_ENABLE != 0);
+static const uint8_t STATUS_LED_PIN = (uint8_t)SCANRIG_STATUS_LED_PIN;
+static const uint8_t STATUS_LED_BRIGHTNESS_DEFAULT = (uint8_t)SCANRIG_STATUS_LED_BRIGHTNESS;
+static const int STATUS_LED_BRIGHTNESS_MIN = 1;
+static const int STATUS_LED_BRIGHTNESS_MAX = 255;
+static bool gStatusLedEnabled = STATUS_LED_ENABLE_DEFAULT;
+static uint8_t gStatusLedBrightness = STATUS_LED_BRIGHTNESS_DEFAULT;
+static String gWifiRuntimeMode = "INIT";
+static String gWifiLastError = "";
+
+struct LedRgb {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+static uint32_t gLedShotFlashUntilMs = 0;
+static uint32_t gLedVictoryUntilMs = 0;
+static uint32_t gLedLastDoneSteps = 0;
+static uint8_t gLedPrevSeqState = 0;
+
+static inline uint8_t ledScale(uint8_t c, uint8_t brightness) {
+  return (uint8_t)(((uint16_t)c * (uint16_t)brightness) / 255u);
+}
+static inline void ledWriteRaw(uint8_t r, uint8_t g, uint8_t b) {
+  if (!gStatusLedEnabled) return;
+  neopixelWrite(STATUS_LED_PIN, ledScale(r, gStatusLedBrightness), ledScale(g, gStatusLedBrightness), ledScale(b, gStatusLedBrightness));
+}
+static inline LedRgb ledBlend(const LedRgb& a, const LedRgb& b, float t) {
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  LedRgb c;
+  c.r = (uint8_t)(a.r + (b.r - a.r) * t);
+  c.g = (uint8_t)(a.g + (b.g - a.g) * t);
+  c.b = (uint8_t)(a.b + (b.b - a.b) * t);
+  return c;
+}
+static inline uint8_t ledPulse8(uint32_t nowMs, uint16_t periodMs, uint8_t minVal, uint8_t maxVal) {
+  if (periodMs < 2) periodMs = 2;
+  uint32_t m = nowMs % periodMs;
+  float t = (float)m / (float)periodMs; // 0..1
+  float tri = (t < 0.5f) ? (t * 2.0f) : ((1.0f - t) * 2.0f);
+  return (uint8_t)(minVal + (uint8_t)((maxVal - minVal) * tri));
+}
+static void ledBootWifiConnectingTick() {
+  if (!gStatusLedEnabled) return;
+  uint8_t p = ledPulse8(millis(), 1000, 6, 90);
+  ledWriteRaw(0, p, p);
+}
 static const uint32_t CAM_AF_PREFOCUS_MS = SCANRIG_CAM_AF_PREFOCUS_MS;
 static const uint32_t CAM_AF_SHUTTER_MS = SCANRIG_CAM_AF_SHUTTER_MS;
 static const uint32_t CAM_AF_POSTFOCUS_MS = SCANRIG_CAM_AF_POSTFOCUS_MS;
@@ -202,8 +266,27 @@ static void saveAutoFocusMode(bool enabled) {
   prefs.end();
 }
 
+static void loadStatusLedConfig() {
+  prefs.begin("scanrig", true);
+  gStatusLedEnabled = prefs.getBool("ledEn", STATUS_LED_ENABLE_DEFAULT);
+  int b = prefs.getInt("ledBr", (int)STATUS_LED_BRIGHTNESS_DEFAULT);
+  prefs.end();
+  if (b < STATUS_LED_BRIGHTNESS_MIN) b = STATUS_LED_BRIGHTNESS_MIN;
+  if (b > STATUS_LED_BRIGHTNESS_MAX) b = STATUS_LED_BRIGHTNESS_MAX;
+  gStatusLedBrightness = (uint8_t)b;
+}
+
+static void saveStatusLedConfig(bool enabled, uint8_t brightness) {
+  prefs.begin("scanrig", false);
+  prefs.putBool("ledEn", enabled);
+  prefs.putInt("ledBr", (int)brightness);
+  prefs.end();
+}
+
 static void wifiStart() {
   loadWifiCreds();
+  gWifiRuntimeMode = "INIT";
+  gWifiLastError = "";
 
   // If nothing saved yet, default to firm profile (can be changed via Serial).
   if (!wifiSsid.length()) {
@@ -241,6 +324,7 @@ static void wifiStart() {
 
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+      ledBootWifiConnectingTick();
       delay(200);
       Serial.print(".");
     }
@@ -248,17 +332,24 @@ static void wifiStart() {
 
     if (WiFi.status() == WL_CONNECTED) {
       Serial.printf("[WIFI] connected IP=%s\n", WiFi.localIP().toString().c_str());
+      gWifiRuntimeMode = "STA";
       return;
     }
     Serial.println("[WIFI] STA connect failed -> AP fallback");
+    gWifiLastError = "STA connect failed; AP fallback enabled";
   } else {
     Serial.println("[WIFI] no ssid -> AP fallback");
+    gWifiLastError = "No SSID configured; AP fallback enabled";
   }
 
   WiFi.mode(WIFI_AP);
   bool ok = WiFi.softAP(AP_SSID, AP_PASS);
   Serial.printf("[WIFI] AP %s ssid='%s' pass='%s'\n", ok ? "ON" : "FAIL", AP_SSID, AP_PASS);
   Serial.printf("[WIFI] AP IP=%s\n", WiFi.softAPIP().toString().c_str());
+  gWifiRuntimeMode = ok ? "AP" : "AP_FAIL";
+  if (!ok && !gWifiLastError.length()) {
+    gWifiLastError = "AP startup failed";
+  }
 }
 
 static void mdnsStart() {
@@ -315,9 +406,28 @@ static String currentIpText() {
   return "0.0.0.0";
 }
 
-static String buildNetworkConfigJson(const String& msg = "") {
+static String wifiModeText() {
+  if (WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED) return "STA";
+  if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) return "AP";
+  return gWifiRuntimeMode;
+}
+
+static String buildApiErrorJson(const String& code, const String& message) {
+  String body = "{";
+  body += "\"ok\":false,";
+  body += "\"code\":\"" + jsonEscape(code) + "\",";
+  body += "\"message\":\"" + jsonEscape(message) + "\",";
+  body += "\"msg\":\"" + jsonEscape(message) + "\"";
+  body += "}";
+  return body;
+}
+
+static String buildNetworkConfigJson(const String& msg = "", const String& code = "OK", const String& savedFieldsJson = "[]") {
   String j = "{";
   j += "\"ok\":true,";
+  j += "\"code\":\"" + jsonEscape(code) + "\",";
+  j += "\"message\":\"" + jsonEscape(msg) + "\",";
+  j += "\"msg\":\"" + jsonEscape(msg) + "\",";
   j += "\"ssid\":\"" + jsonEscape(wifiSsid) + "\",";
   j += "\"passSet\":" + String(wifiPass.length() ? 1 : 0) + ",";
   j += "\"useStatic\":" + String(wifiUseStatic ? 1 : 0) + ",";
@@ -325,11 +435,17 @@ static String buildNetworkConfigJson(const String& msg = "") {
   j += "\"gw\":\"" + jsonEscape(wifiGwStr) + "\",";
   j += "\"dns\":\"" + jsonEscape(wifiDnsStr) + "\",";
   j += "\"mask\":\"" + jsonEscape(wifiMaskStr) + "\",";
+  j += "\"ledEnable\":" + String(gStatusLedEnabled ? 1 : 0) + ",";
+  j += "\"ledBrightness\":" + String((int)gStatusLedBrightness) + ",";
+  j += "\"ledBrightnessMin\":" + String(STATUS_LED_BRIGHTNESS_MIN) + ",";
+  j += "\"ledBrightnessMax\":" + String(STATUS_LED_BRIGHTNESS_MAX) + ",";
   j += "\"mdns\":\"" + jsonEscape(String(MDNS_NAME)) + "\",";
-  j += "\"currentIp\":\"" + jsonEscape(currentIpText()) + "\"";
-  if (msg.length()) {
-    j += ",\"msg\":\"" + jsonEscape(msg) + "\"";
-  }
+  j += "\"currentIp\":\"" + jsonEscape(currentIpText()) + "\",";
+  j += "\"wifiMode\":\"" + jsonEscape(wifiModeText()) + "\",";
+  j += "\"apSsid\":\"" + jsonEscape(String(AP_SSID)) + "\",";
+  j += "\"apPassSet\":" + String(String(AP_PASS).length() ? 1 : 0) + ",";
+  j += "\"wifiLastError\":\"" + jsonEscape(gWifiLastError) + "\",";
+  j += "\"savedFields\":" + savedFieldsJson;
   j += "}";
   return j;
 }
@@ -596,6 +712,8 @@ static String gFwUpdateError = "";
 static const char* FW_VERSION = SCANRIG_FW_VERSION;
 static const char* UI_VERSION = SCANRIG_UI_VERSION;
 static const char* UPDATE_MANIFEST_URL = SCANRIG_UPDATE_MANIFEST_URL;
+static const char* BUILD_GIT = SCANRIG_BUILD_GIT;
+static const char* BUILD_TIME = __DATE__ " " __TIME__;
 
 class TTClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*) override {
@@ -823,6 +941,136 @@ static bool gIdleHaveAngle = false;
 static uint32_t gRotStepStartMs = 0;
 static float gRotStepMsAvg = 0.0f;
 static uint32_t gRotStepMsSamples = 0;
+
+static void ledTick(uint32_t nowMs) {
+  if (!gStatusLedEnabled) {
+    neopixelWrite(STATUS_LED_PIN, 0, 0, 0);
+    return;
+  }
+
+  // Detect shot progress edges for short white "tick" flashes while running.
+  if (gDoneSteps != gLedLastDoneSteps) {
+    if (gSeqState == SEQ_RUNNING && gDoneSteps > gLedLastDoneSteps) {
+      gLedShotFlashUntilMs = nowMs + 85;
+    }
+    gLedLastDoneSteps = gDoneSteps;
+  }
+
+  // Victory animation trigger when a run transitions to IDLE and completed all steps.
+  if (gLedPrevSeqState == (uint8_t)SEQ_RUNNING &&
+      gSeqState == SEQ_IDLE &&
+      gTotalSteps > 0 &&
+      gDoneSteps >= gTotalSteps) {
+    gLedVictoryUntilMs = nowMs + 3000;
+  }
+  gLedPrevSeqState = (uint8_t)gSeqState;
+
+  // Prio 1: OTA activity / failure.
+  if (gFwUpdateInProgress) {
+    bool alt = ((nowMs / 120) % 2) == 0;
+    if (alt) ledWriteRaw(160, 0, 180); else ledWriteRaw(0, 150, 200);
+    return;
+  }
+  if (gFwUpdateError.length()) {
+    bool on = ((nowMs / 160) % 2) == 0;
+    ledWriteRaw(on ? 220 : 0, 0, 0);
+    return;
+  }
+
+  // Prio 2: network states.
+  wl_status_t wifiSt = WiFi.status();
+  wifi_mode_t wifiMode = WiFi.getMode();
+  if (wifiMode == WIFI_AP || wifiMode == WIFI_AP_STA) {
+    // Orange double-blink: 120ms ON, 120ms OFF, 120ms ON, 640ms OFF
+    uint16_t p = (uint16_t)(nowMs % 1000);
+    bool on = (p < 120) || (p >= 240 && p < 360);
+    ledWriteRaw(on ? 180 : 0, on ? 70 : 0, 0);
+    return;
+  }
+  if (wifiSt != WL_CONNECTED) {
+    uint8_t p = ledPulse8(nowMs, 1000, 8, 100);
+    ledWriteRaw(0, p, p);
+    return;
+  }
+
+  // Prio 3: transport/turntable issues.
+  if (!gBleConnected) {
+    bool on = ((nowMs / 500) % 2) == 0;
+    ledWriteRaw(on ? 180 : 0, 0, 0);
+    return;
+  }
+
+  // Prio 4: sequencer states.
+  if (gSeqState == SEQ_PAUSED) {
+    uint8_t p = ledPulse8(nowMs, 900, 20, 120);
+    ledWriteRaw(p, (uint8_t)(p * 0.55f), 0);
+    return;
+  }
+
+  if (gSeqState == SEQ_RUNNING) {
+    if (gLedShotFlashUntilMs > nowMs) {
+      ledWriteRaw(160, 160, 160);
+      return;
+    }
+
+    if (gSub == SUB_FLASH_COOLDOWN && gFlashGuardUntilMs > nowMs) {
+      uint32_t remain = gFlashGuardUntilMs - nowMs;
+      // Speed up pulse as guard cooldown approaches zero.
+      uint16_t period = (remain > 60000) ? 900 : (remain > 15000 ? 500 : 260);
+      uint8_t p = ledPulse8(nowMs, period, 18, 140);
+      ledWriteRaw(p, (uint8_t)(p * 0.55f), 0);
+      return;
+    }
+
+    if (gSub == SUB_RECOVER || gSub == SUB_RECOVER_WAIT || gSub == SUB_ROT_SEEK_WAIT) {
+      bool alt = ((nowMs / 220) % 2) == 0;
+      if (alt) ledWriteRaw(170, 45, 0); else ledWriteRaw(120, 0, 0);
+      return;
+    }
+
+    if (gSub == SUB_TILT_SEND || gSub == SUB_TILT_WAIT) {
+      uint8_t p = ledPulse8(nowMs, 1000, 12, 120);
+      ledWriteRaw(p, (uint8_t)(p * 0.45f), 0);
+      return;
+    }
+
+    if (gSub == SUB_ROT_SEND || gSub == SUB_ROT_WAIT) {
+      uint8_t p = ledPulse8(nowMs, 450, 10, 130);
+      ledWriteRaw(0, (uint8_t)(p * 0.35f), p);
+      return;
+    }
+
+    if (gSub == SUB_SNAP) {
+      ledWriteRaw(180, 180, 180);
+      return;
+    }
+
+    // Progress color from blue -> green, plus subtle pulse.
+    float frac = 0.0f;
+    if (gTotalSteps > 0) frac = (float)gDoneSteps / (float)gTotalSteps;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    LedRgb start = {0, 50, 180};
+    LedRgb end = {0, 170, 35};
+    LedRgb c = ledBlend(start, end, frac);
+    uint8_t pulse = ledPulse8(nowMs, 800, 160, 255);
+    c.r = (uint8_t)(((uint16_t)c.r * pulse) / 255u);
+    c.g = (uint8_t)(((uint16_t)c.g * pulse) / 255u);
+    c.b = (uint8_t)(((uint16_t)c.b * pulse) / 255u);
+    ledWriteRaw(c.r, c.g, c.b);
+    return;
+  }
+
+  // IDLE victory phase.
+  if (gLedVictoryUntilMs > nowMs) {
+    uint8_t p = ledPulse8(nowMs, 300, 35, 190);
+    ledWriteRaw(0, p, 0);
+    return;
+  }
+
+  // Default ready state.
+  ledWriteRaw(0, 35, 0);
+}
 
 /*
 Turntable control reference (vendor template):
@@ -1467,6 +1715,8 @@ static String buildRigStateJson() {
   j += "\"ANGLE_LAST\":\"" + String(gLastAngle, 2) + "\",";
   j += "\"FW_VER\":\"" + String(FW_VERSION) + "\",";
   j += "\"UI_VER\":\"" + String(UI_VERSION) + "\",";
+  j += "\"BUILD_GIT\":\"" + jsonEscape(String(BUILD_GIT)) + "\",";
+  j += "\"BUILD_TIME\":\"" + jsonEscape(String(BUILD_TIME)) + "\",";
   j += "\"UPDATE_URL\":\"" + jsonEscape(String(UPDATE_MANIFEST_URL)) + "\",";
   j += "\"TRIGGER_MODE\":\"" + String(gTriggerMode == TRIGGER_MODE_SMARTPHONE ? "SMARTPHONE" : "HARDWARE") + "\",";
   j += "\"TRIGGER_ENABLED\":\"" + String(gTriggerEnabled ? 1 : 0) + "\",";
@@ -1491,6 +1741,8 @@ static String buildRigStateJson() {
   j += "\"BLE\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"TT\":\"" + String(bleNow ? 1 : 0) + "\",";
   j += "\"IP\":\"" + ip + "\",";
+  j += "\"HOST\":\"" + jsonEscape(String(MDNS_NAME) + ".local") + "\",";
+  j += "\"WIFI_MODE\":\"" + jsonEscape(wifiModeText()) + "\",";
   j += "\"PORT\":\"" + String(HTTP_PORT) + "\",";
   j += "\"SUB\":\"" + String((int)gSub) + "\"";
   j += "}";
@@ -2049,6 +2301,7 @@ static void bleHeartbeatTick() {
 void setup() {
   Serial.begin(115200);
   delay(200);
+  ledWriteRaw(0, 0, 0);
 
   if (CAM_FOCUS_PIN >= 0) {
     pinMode(CAM_FOCUS_PIN, OUTPUT);
@@ -2061,6 +2314,7 @@ void setup() {
 
   loadTriggerMode();
   loadAutoFocusMode();
+  loadStatusLedConfig();
 
   loadWifiCreds();
   wifiStart();
@@ -2087,23 +2341,39 @@ void setup() {
     req->send(200, "application/json; charset=utf-8", buildNetworkConfigJson());
   });
   server.on("/api/network", HTTP_POST, [](AsyncWebServerRequest* req) {
+    bool hasSsid = req->hasParam("ssid", true);
+    bool hasPass = req->hasParam("pass", true);
+    bool hasPassProvided = req->hasParam("passProvided", true);
+    bool hasUseStatic = req->hasParam("useStatic", true);
+    bool hasIp = req->hasParam("ip", true);
+    bool hasGw = req->hasParam("gw", true);
+    bool hasDns = req->hasParam("dns", true);
+    bool hasMask = req->hasParam("mask", true);
+    bool hasLedEnable = req->hasParam("ledEnable", true);
+    bool hasLedBrightness = req->hasParam("ledBrightness", true);
+    bool hasReboot = req->hasParam("reboot", true);
+
     String ssid = getPostParam(req, "ssid", wifiSsid);
     ssid.trim();
     if (!ssid.length()) {
       req->send(400, "application/json; charset=utf-8",
-                "{\"ok\":false,\"msg\":\"SSID is required\"}");
+                buildApiErrorJson("VALIDATION_ERROR", "SSID is required"));
       return;
     }
 
     String pass = getPostParam(req, "pass", "");
     bool passProvided = parseBoolParam(getPostParam(req, "passProvided", "0"));
-    bool useStatic = parseBoolParam(getPostParam(req, "useStatic", "0"));
+    bool useStatic = parseBoolParam(getPostParam(req, "useStatic", wifiUseStatic ? "1" : "0"));
     bool reboot = parseBoolParam(getPostParam(req, "reboot", "0"));
+    bool ledEnable = parseBoolParam(getPostParam(req, "ledEnable", gStatusLedEnabled ? "1" : "0"));
+    int ledBrightness = getPostParam(req, "ledBrightness", String((int)gStatusLedBrightness)).toInt();
+    if (ledBrightness < STATUS_LED_BRIGHTNESS_MIN) ledBrightness = STATUS_LED_BRIGHTNESS_MIN;
+    if (ledBrightness > STATUS_LED_BRIGHTNESS_MAX) ledBrightness = STATUS_LED_BRIGHTNESS_MAX;
 
-    String ip = getPostParam(req, "ip", "");
-    String gw = getPostParam(req, "gw", "");
-    String dns = getPostParam(req, "dns", "");
-    String mask = getPostParam(req, "mask", "");
+    String ip = getPostParam(req, "ip", wifiIpStr);
+    String gw = getPostParam(req, "gw", wifiGwStr);
+    String dns = getPostParam(req, "dns", wifiDnsStr);
+    String mask = getPostParam(req, "mask", wifiMaskStr);
     ip.trim();
     gw.trim();
     dns.trim();
@@ -2112,8 +2382,8 @@ void setup() {
     if (useStatic) {
       String err;
       if (!validateStaticConfig(ip, gw, dns, mask, err)) {
-        String body = String("{\"ok\":false,\"msg\":\"") + jsonEscape(err) + "\"}";
-        req->send(400, "application/json; charset=utf-8", body);
+        req->send(400, "application/json; charset=utf-8",
+                  buildApiErrorJson("VALIDATION_ERROR", err));
         return;
       }
     } else {
@@ -2124,23 +2394,46 @@ void setup() {
     }
 
     wifiSsid = ssid;
-    if (passProvided) {
-      wifiPass = pass;
-    }
+    if (passProvided) wifiPass = pass;
     wifiUseStatic = useStatic;
     wifiIpStr = ip;
     wifiGwStr = gw;
     wifiDnsStr = dns;
     wifiMaskStr = mask;
+    gStatusLedEnabled = ledEnable;
+    gStatusLedBrightness = (uint8_t)ledBrightness;
 
     saveWifiCreds(wifiSsid, wifiPass);
     saveWifiStatic(wifiUseStatic, wifiIpStr, wifiGwStr, wifiDnsStr, wifiMaskStr);
+    saveStatusLedConfig(gStatusLedEnabled, gStatusLedBrightness);
+
+    String savedFieldsJson = "[";
+    bool first = true;
+    auto addSavedField = [&](const char* k) {
+      if (!first) savedFieldsJson += ",";
+      savedFieldsJson += "\"";
+      savedFieldsJson += k;
+      savedFieldsJson += "\"";
+      first = false;
+    };
+    if (hasSsid) addSavedField("ssid");
+    if (hasPass && hasPassProvided && passProvided) addSavedField("pass");
+    if (hasUseStatic) addSavedField("useStatic");
+    if (hasIp) addSavedField("ip");
+    if (hasGw) addSavedField("gw");
+    if (hasDns) addSavedField("dns");
+    if (hasMask) addSavedField("mask");
+    if (hasLedEnable) addSavedField("ledEnable");
+    if (hasLedBrightness) addSavedField("ledBrightness");
+    if (hasReboot) addSavedField("reboot");
+    savedFieldsJson += "]";
 
     String msg = reboot
-      ? "network config saved; rebooting"
-      : "network config saved (reboot to apply)";
-    req->send(200, "application/json; charset=utf-8", buildNetworkConfigJson(msg));
+      ? "network settings saved; rebooting"
+      : "network settings saved (reboot to apply)";
+    req->send(200, "application/json; charset=utf-8", buildNetworkConfigJson(msg, "NETWORK_SAVED", savedFieldsJson));
     wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[NET] ") + jsonEscape(msg) + "\"}");
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[NET] saved fields: ") + jsonEscape(savedFieldsJson) + "\"}");
 
     if (reboot) {
       delay(250);
@@ -2151,9 +2444,13 @@ void setup() {
     [](AsyncWebServerRequest* req) {
       bool ok = gFwUpdateOk && !Update.hasError();
       int code = ok ? 200 : 500;
-      String body = ok
-        ? String("{\"ok\":true,\"msg\":\"update successful; rebooting\"}")
-        : String("{\"ok\":false,\"msg\":\"") + jsonEscape(gFwUpdateError.length() ? gFwUpdateError : String("update failed")) + "\"}";
+      String message = ok ? "update successful; rebooting" : (gFwUpdateError.length() ? gFwUpdateError : String("update failed"));
+      String body = "{";
+      body += "\"ok\":" + String(ok ? "true" : "false") + ",";
+      body += "\"code\":\"" + String(ok ? "UPDATE_OK" : "UPDATE_FAILED") + "\",";
+      body += "\"message\":\"" + jsonEscape(message) + "\",";
+      body += "\"msg\":\"" + jsonEscape(message) + "\"";
+      body += "}";
       req->send(code, "application/json; charset=utf-8", body);
 
       gFwUpdateInProgress = false;
@@ -2340,6 +2637,7 @@ void loop() {
   // periodically push status (lightweight)
   static uint32_t nextStatus = 0;
   uint32_t now = millis();
+  ledTick(now);
   if ((int32_t)(now - nextStatus) >= 0) {
     wsSendStatus();
     nextStatus = now + 500; // 2 Hz

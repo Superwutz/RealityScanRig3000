@@ -111,6 +111,20 @@ Quick hardware tests (before full scan):
 - `SNAP_TRIGGER` -> toggles trigger relay only
 - `SNAP` -> full shutter event (focus + trigger sequence in hardware mode)
 
+## Onboard Status LED
+
+The onboard RGB LED is used as a live status indicator with animations:
+- Wi-Fi connecting: cyan breathing
+- AP fallback: orange double-blink
+- Scan running: animated blue/green progress
+- Flash guard cooldown: amber pulse
+- Paused/recover/error states: dedicated warning/error patterns
+
+Configurable in `src/secrets.local.h`:
+- `SCANRIG_STATUS_LED_ENABLE`
+- `SCANRIG_STATUS_LED_PIN`
+- `SCANRIG_STATUS_LED_BRIGHTNESS`
+
 ## Privacy and Credentials
 
 Do not commit real credentials.

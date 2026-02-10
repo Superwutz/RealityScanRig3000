@@ -48,6 +48,11 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 #define SCANRIG_CAM_ACTIVE_LOW 0
 #define SCANRIG_CAM_PRESS_MS 120
 #define SCANRIG_CAM_PREFOCUS_MS 0
+
+// Onboard status RGB LED (ESP32-S3 DevKitC usually GPIO48 / RGB_BUILTIN).
+#define SCANRIG_STATUS_LED_ENABLE 1
+#define SCANRIG_STATUS_LED_PIN 48
+#define SCANRIG_STATUS_LED_BRIGHTNESS 28
 #define SCANRIG_CAM_AF_PREFOCUS_MS 450
 #define SCANRIG_CAM_AF_SHUTTER_MS 180
 #define SCANRIG_CAM_AF_POSTFOCUS_MS 80
