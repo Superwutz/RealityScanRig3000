@@ -874,7 +874,7 @@ static SeqSub   gSub = SUB_NONE;
 
 // Defaults (UI can SET these)
 static int   gRotSteps  = 72;
-static int   gTiltSteps = 9;
+static int   gTiltSteps = 5;
 static float gTiltFrom  = -30.0f;
 static float gTiltTo    = +30.0f;
 
@@ -900,7 +900,7 @@ static float gRotRowZeroDeg = 0.0f;
 static uint32_t gStateTs = 0;
 static uint32_t gNextPollTs = 0;
 
-static uint32_t gTotalSteps = 72 * 9;
+static uint32_t gTotalSteps = 72 * 5;
 static uint32_t gDoneSteps = 0;
 
 static bool gResumePending = false;
