@@ -4,6 +4,9 @@ param(
   [string]$Version,
   [string]$EnvName = "esp32s3",
   [string]$StageRoot = ".staging/web-installer",
+  [string]$UiDeviceUrl = "http://scanrig.local",
+  [switch]$SkipUiTests,
+  [switch]$SkipDeviceTests,
   [switch]$Commit,
   [switch]$Tag,
   [switch]$Push
@@ -13,6 +16,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $stageScript = Join-Path $PSScriptRoot "stage-web-installer.ps1"
+$uiTestScript = Join-Path $PSScriptRoot "ui-test.ps1"
 $mainCpp = Join-Path $repoRoot "src/main.cpp"
 $docsDir = Join-Path $repoRoot "docs"
 
@@ -32,6 +36,9 @@ function Get-GitText {
 if (-not (Test-Path $stageScript)) {
   throw "Missing script: $stageScript"
 }
+if (-not (Test-Path $uiTestScript)) {
+  throw "Missing script: $uiTestScript"
+}
 if (-not (Test-Path $mainCpp)) {
   throw "Missing file: $mainCpp"
 }
@@ -50,6 +57,27 @@ if ($branch -ne "main") {
 $worktreeState = Get-GitText @("status", "--porcelain")
 if ($worktreeState) {
   throw "Working tree must be clean before release."
+}
+
+$runUiTests = -not $SkipUiTests
+if ($runUiTests) {
+  Write-Output "Running UI smoke tests (local rendered UI)..."
+  powershell -ExecutionPolicy Bypass -File $uiTestScript -ServeDocs
+  if ($LASTEXITCODE -ne 0) {
+    throw "UI smoke tests failed."
+  }
+
+  if (-not $SkipDeviceTests) {
+    Write-Output "Running UI device tests against $UiDeviceUrl ..."
+    powershell -ExecutionPolicy Bypass -File $uiTestScript -Url $UiDeviceUrl -DeviceOnly
+    if ($LASTEXITCODE -ne 0) {
+      throw "UI device tests failed."
+    }
+  } else {
+    Write-Output "Skipping UI device tests (-SkipDeviceTests)."
+  }
+} else {
+  Write-Output "Skipping all UI tests (-SkipUiTests)."
 }
 
 $manifestPath = Join-Path $docsDir "manifest.json"

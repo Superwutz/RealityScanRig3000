@@ -39,15 +39,25 @@ From repo root on `main`:
 powershell -ExecutionPolicy Bypass -File .\tools\release.ps1 -Version v0.4.3 -Commit -Tag -Push
 ```
 
+By default, the release script now runs:
+- UI smoke tests against locally rendered embedded UI
+- UI device tests against `http://scanrig.local`
+
+Useful switches:
+- `-UiDeviceUrl http://your-rig-hostname-or-ip`
+- `-SkipDeviceTests` (keeps local UI smoke tests)
+- `-SkipUiTests` (skip all UI tests)
+
 What it does:
 
 1. Validates branch, clean worktree, and version bump.
-2. Updates `SCANRIG_FW_VERSION` and `SCANRIG_UI_VERSION` in `src/main.cpp`.
-3. Builds firmware and stages installer bundle.
-4. Updates release artifacts in `docs/` (`manifest.json`, binaries, installer page).
-5. Creates commit `release: vX.Y.Z`.
-6. Creates annotated git tag `vX.Y.Z`.
-7. Pushes `main` and tag.
+2. Runs UI smoke tests and device-backed UI tests (unless skipped).
+3. Updates `SCANRIG_FW_VERSION` and `SCANRIG_UI_VERSION` in `src/main.cpp`.
+4. Builds firmware and stages installer bundle.
+5. Updates release artifacts in `docs/` (`manifest.json`, binaries, installer page).
+6. Creates commit `release: vX.Y.Z`.
+7. Creates annotated git tag `vX.Y.Z`.
+8. Pushes `main` and tag.
 
 ## Dry Run / Prepare Only
 

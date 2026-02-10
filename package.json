@@ -1,0 +1,15 @@
+{
+  "name": "realityscanrig3000-ui-tests",
+  "private": true,
+  "version": "0.0.1",
+  "description": "UI smoke tests for RealityScanRig3000",
+  "scripts": {
+    "ui:test": "playwright test",
+    "ui:test:device": "playwright test -g @device",
+    "ui:test:headed": "playwright test --headed",
+    "ui:test:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}

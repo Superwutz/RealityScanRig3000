@@ -26,6 +26,10 @@ Thumbs.db
 .tmp_ui/
 release/
 .staging/
+node_modules/
+playwright-report/
+test-results/
+ui-test-artifacts/
 
 # Local secrets (do not commit)
 src/secrets.local.h

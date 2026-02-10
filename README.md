@@ -136,6 +136,27 @@ Do not commit real credentials.
 
 For release workflow details, see `RELEASE.md`.
 
+UI automation (render + interaction smoke test):
+- Install once: `cmd /c npm install`
+- Run against local static UI:  
+  `powershell -ExecutionPolicy Bypass -File .\tools\ui-test.ps1 -ServeDocs`
+- Run against a live rig UI (recommended for functional checks):  
+  `powershell -ExecutionPolicy Bypass -File .\tools\ui-test.ps1 -Url http://scanrig.local`
+- Run only device-backed tests (requires reachable rig backend):  
+  `powershell -ExecutionPolicy Bypass -File .\tools\ui-test.ps1 -Url http://scanrig.local -DeviceOnly`
+
+What it checks:
+- UI renders and key sections are visible
+- Core tab/settings interactions
+- Broad UI coverage (Control + Presets + Parameters + Firmware section)
+- Dirty-state indicator behavior
+- Settings layout sanity (no overlap between dirty hint and save row)
+- Conditional start warning when turntable is disconnected
+- Optional relay diagnostics button clicks (if enabled)
+- Device tests (`@device`):
+  - `/api/network` + Settings Save/Reload roundtrip with restore
+  - Control-flow sanity (presets, trigger toggle, manual action feedback, TT start guard)
+
 Core files:
 - Firmware: `src/main.cpp`
 - Embedded web assets: `src/web_assets.h`
