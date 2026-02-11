@@ -43,8 +43,8 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 // Suggested starter pins (ESP32-S3 DevKitC):
 // - Focus relay IN  -> GPIO16
 // - Trigger relay IN -> GPIO17
-#define SCANRIG_CAM_FOCUS_PIN 16
-#define SCANRIG_CAM_SHUTTER_PIN 17
+#define SCANRIG_CAM_FOCUS_PIN 17
+#define SCANRIG_CAM_SHUTTER_PIN 16
 #define SCANRIG_CAM_ACTIVE_LOW 0
 #define SCANRIG_CAM_PRESS_MS 120
 #define SCANRIG_CAM_PREFOCUS_MS 0
