@@ -161,7 +161,6 @@ Core files:
 - Firmware: `src/main.cpp`
 - Embedded web assets: `src/web_assets.h`
 - Web installer template: `deploy/web-installer/index.html`
-- Optional global install counter worker: `deploy/counter-worker/`
 - Published installer/OTA artifacts: `docs/`
 
 ## Security Reporting
