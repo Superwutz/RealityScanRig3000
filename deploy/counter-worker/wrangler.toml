@@ -1,0 +1,7 @@
+name = "scanrig-counter"
+main = "src/index.js"
+compatibility_date = "2026-02-13"
+
+kv_namespaces = [
+  { binding = "SCANRIG_COUNTER_KV", id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+]

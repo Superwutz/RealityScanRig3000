@@ -162,19 +162,9 @@
       letter-spacing: 0.02em;
     }
 
-    .counter-btn {
-      border: 1px solid #3e5f97;
-      border-radius: 8px;
-      background: #12213e;
-      color: #dbe7ff;
-      padding: 7px 10px;
+    .counter-state {
+      color: var(--muted);
       font-size: 12px;
-      cursor: pointer;
-    }
-
-    .counter-btn:hover {
-      border-color: #5a83ce;
-      background: #162a4f;
     }
 
     ul {
@@ -245,7 +235,7 @@
             <span class="counter-label">Global successful installs</span>
             <span id="installCounterValue" class="counter-value">loading ...</span>
           </div>
-          <button id="installCounterConfirm" class="counter-btn" type="button">I completed installation</button>
+          <span id="installCounterState" class="counter-state">waiting for installer status ...</span>
         </div>
       </article>
 
@@ -275,53 +265,150 @@
     (function () {
       const namespace = "superwutz-realityscanrig3000";
       const key = "installer-success-total";
-      const getUrl = `https://api.countapi.xyz/get/${namespace}/${key}`;
-      const hitUrl = `https://api.countapi.xyz/hit/${namespace}/${key}`;
+      const workerBase = (window.SCANRIG_COUNTER_WORKER_BASE || "").trim().replace(/\/+$/, "");
+      const endpoints = [];
+      if (workerBase) {
+        endpoints.push({
+          name: "worker",
+          getUrl: `${workerBase}/counter?key=${encodeURIComponent(key)}`,
+          hitUrl: `${workerBase}/counter/hit?key=${encodeURIComponent(key)}`,
+        });
+      }
+      endpoints.push({
+        name: "countapi-fallback",
+        getUrl: `https://api.countapi.xyz/get/${namespace}/${key}`,
+        hitUrl: `https://api.countapi.xyz/hit/${namespace}/${key}`,
+      });
       const counterEl = document.getElementById("installCounterValue");
-      const confirmBtn = document.getElementById("installCounterConfirm");
+      const counterStateEl = document.getElementById("installCounterState");
       const installBtn = document.querySelector("esp-web-install-button");
       let incrementedThisSession = false;
+      let installAttemptSeen = false;
+
+      function setCounterState(msg) {
+        if (counterStateEl) counterStateEl.textContent = msg;
+      }
+
+      async function fetchCounterValue(url) {
+        const res = await fetch(url, { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok || !data || !Number.isFinite(data.value)) {
+          throw new Error("invalid counter response");
+        }
+        return Number(data.value);
+      }
+
+      async function readFromAnyEndpoint() {
+        let lastErr = "";
+        for (const ep of endpoints) {
+          try {
+            const value = await fetchCounterValue(ep.getUrl);
+            return { ok: true, value, endpoint: ep.name };
+          } catch (err) {
+            lastErr = (err && err.message) ? err.message : "read failed";
+          }
+        }
+        return { ok: false, error: lastErr };
+      }
+
+      async function hitAnyEndpoint() {
+        let lastErr = "";
+        for (const ep of endpoints) {
+          try {
+            const value = await fetchCounterValue(ep.hitUrl);
+            return { ok: true, value, endpoint: ep.name };
+          } catch (err) {
+            lastErr = (err && err.message) ? err.message : "hit failed";
+          }
+        }
+        return { ok: false, error: lastErr };
+      }
 
       async function readCounter() {
         if (!counterEl) return;
-        try {
-          const res = await fetch(getUrl, { cache: "no-store" });
-          const data = await res.json();
-          if (res.ok && data && Number.isFinite(data.value)) {
-            counterEl.textContent = String(data.value);
-          } else {
-            counterEl.textContent = "unavailable";
-          }
-        } catch (_) {
+        const result = await readFromAnyEndpoint();
+        if (result.ok) {
+          counterEl.textContent = String(result.value);
+          setCounterState(`counter loaded (${result.endpoint})`);
+        } else {
           counterEl.textContent = "unavailable";
+          setCounterState("counter unavailable");
         }
+      }
+
+      function looksSuccessfulState(raw) {
+        const s = String(raw || "").toLowerCase();
+        if (!s) return false;
+        return (
+          s.includes("finish") ||
+          s.includes("success") ||
+          s.includes("complete") ||
+          s.includes("improv_finished")
+        );
       }
 
       async function incrementCounterOnce() {
         if (incrementedThisSession) return;
         incrementedThisSession = true;
-        try {
-          const res = await fetch(hitUrl, { cache: "no-store" });
-          const data = await res.json();
-          if (res.ok && data && Number.isFinite(data.value) && counterEl) {
-            counterEl.textContent = String(data.value);
-          }
-        } catch (_) {
-          // Keep silent; counter is optional telemetry.
+        const result = await hitAnyEndpoint();
+        if (result.ok) {
+          if (counterEl) counterEl.textContent = String(result.value);
+          setCounterState(`install completed (counter updated via ${result.endpoint})`);
+        } else {
+          setCounterState("install completed (counter update failed)");
         }
       }
 
-      if (confirmBtn) {
-        confirmBtn.addEventListener("click", incrementCounterOnce);
+      function maybeIncrementFromState(rawState, source) {
+        const state = String(rawState || "").trim();
+        if (!state) return;
+        setCounterState(`installer state: ${state} (${source})`);
+        if (looksSuccessfulState(state)) {
+          incrementCounterOnce();
+        }
       }
 
       if (installBtn) {
+        installBtn.addEventListener("click", () => {
+          installAttemptSeen = true;
+          setCounterState("installer started ...");
+        });
+
         installBtn.addEventListener("state-changed", (ev) => {
-          const state = String(ev && ev.detail && ev.detail.state ? ev.detail.state : "").toLowerCase();
-          if (state.includes("finish") || state.includes("success") || state.includes("complete")) {
-            incrementCounterOnce();
+          const state = ev && ev.detail && ev.detail.state ? ev.detail.state : "";
+          maybeIncrementFromState(state, "event");
+        });
+
+        // Fallback listeners for version differences.
+        ["statechanged", "install-complete", "finished"].forEach((evtName) => {
+          installBtn.addEventListener(evtName, (ev) => {
+            const state = ev && ev.detail && ev.detail.state ? ev.detail.state : evtName;
+            maybeIncrementFromState(state, evtName);
+          });
+        });
+
+        // Observe possible state attributes exposed by the custom element.
+        const observer = new MutationObserver(() => {
+          const attrs = ["state", "install-state", "data-state", "status"];
+          for (const a of attrs) {
+            const v = installBtn.getAttribute(a);
+            if (v) {
+              maybeIncrementFromState(v, `attr:${a}`);
+              return;
+            }
           }
         });
+        observer.observe(installBtn, { attributes: true });
+
+        // Last-resort fallback: detect success wording in rendered text after a started install.
+        const textObserver = new MutationObserver(() => {
+          if (!installAttemptSeen || incrementedThisSession) return;
+          const txt = String(installBtn.textContent || "").toLowerCase();
+          if (looksSuccessfulState(txt) || txt.includes("done")) {
+            maybeIncrementFromState(txt, "text");
+          }
+        });
+        textObserver.observe(installBtn, { childList: true, subtree: true, characterData: true });
       }
 
       readCounter();
