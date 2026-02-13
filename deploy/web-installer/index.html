@@ -129,6 +129,54 @@
       margin-top: 14px;
     }
 
+    .counter-wrap {
+      margin-top: 12px;
+      border: 1px solid #274675;
+      border-radius: 10px;
+      background: rgba(108, 152, 255, 0.08);
+      padding: 10px 12px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      font-size: 13px;
+      color: #dbe7ff;
+    }
+
+    .counter-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .counter-label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .counter-value {
+      color: #b9ffd7;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .counter-btn {
+      border: 1px solid #3e5f97;
+      border-radius: 8px;
+      background: #12213e;
+      color: #dbe7ff;
+      padding: 7px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .counter-btn:hover {
+      border-color: #5a83ce;
+      background: #162a4f;
+    }
+
     ul {
       margin: 8px 0 0;
       padding-left: 18px;
@@ -192,6 +240,13 @@
         <div class="warn">
           If your board is not detected, use a USB data cable and close apps that lock the serial port.
         </div>
+        <div class="counter-wrap">
+          <div class="counter-meta">
+            <span class="counter-label">Global successful installs</span>
+            <span id="installCounterValue" class="counter-value">loading ...</span>
+          </div>
+          <button id="installCounterConfirm" class="counter-btn" type="button">I completed installation</button>
+        </div>
       </article>
 
       <article class="card">
@@ -216,5 +271,61 @@
       <span>Maintained by <strong>Superwutz</strong> | Use at your own risk.</span>
     </footer>
   </main>
+  <script>
+    (function () {
+      const namespace = "superwutz-realityscanrig3000";
+      const key = "installer-success-total";
+      const getUrl = `https://api.countapi.xyz/get/${namespace}/${key}`;
+      const hitUrl = `https://api.countapi.xyz/hit/${namespace}/${key}`;
+      const counterEl = document.getElementById("installCounterValue");
+      const confirmBtn = document.getElementById("installCounterConfirm");
+      const installBtn = document.querySelector("esp-web-install-button");
+      let incrementedThisSession = false;
+
+      async function readCounter() {
+        if (!counterEl) return;
+        try {
+          const res = await fetch(getUrl, { cache: "no-store" });
+          const data = await res.json();
+          if (res.ok && data && Number.isFinite(data.value)) {
+            counterEl.textContent = String(data.value);
+          } else {
+            counterEl.textContent = "unavailable";
+          }
+        } catch (_) {
+          counterEl.textContent = "unavailable";
+        }
+      }
+
+      async function incrementCounterOnce() {
+        if (incrementedThisSession) return;
+        incrementedThisSession = true;
+        try {
+          const res = await fetch(hitUrl, { cache: "no-store" });
+          const data = await res.json();
+          if (res.ok && data && Number.isFinite(data.value) && counterEl) {
+            counterEl.textContent = String(data.value);
+          }
+        } catch (_) {
+          // Keep silent; counter is optional telemetry.
+        }
+      }
+
+      if (confirmBtn) {
+        confirmBtn.addEventListener("click", incrementCounterOnce);
+      }
+
+      if (installBtn) {
+        installBtn.addEventListener("state-changed", (ev) => {
+          const state = String(ev && ev.detail && ev.detail.state ? ev.detail.state : "").toLowerCase();
+          if (state.includes("finish") || state.includes("success") || state.includes("complete")) {
+            incrementCounterOnce();
+          }
+        });
+      }
+
+      readCounter();
+    })();
+  </script>
 </body>
 </html>
