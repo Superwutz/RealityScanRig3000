@@ -101,7 +101,9 @@ Firmware configuration:
 - Set trigger pins in `src/secrets.local.h`:
   - `SCANRIG_CAM_FOCUS_PIN`
   - `SCANRIG_CAM_SHUTTER_PIN`
-- Keep `SCANRIG_CAM_ACTIVE_LOW 1` for typical low-level-trigger relay modules.
+- Set `SCANRIG_CAM_ACTIVE_LOW` to match your relay board: `1` for the common
+  active-low (low-level-trigger) modules, `0` for active-high boards
+  (see `src/secrets.example.h`).
 - Tune timings if needed:
   - `SCANRIG_CAM_PREFOCUS_MS`
   - `SCANRIG_CAM_PRESS_MS`
@@ -136,10 +138,29 @@ Do not commit real credentials.
 
 For release workflow details, see `RELEASE.md`.
 
+### Web UI sources
+
+The browser UI is developed as plain files in `web/`
+(`index.html`, `style.css`, `app.js`). The firmware serves them from the
+generated header `src/web_assets.h` - do not edit that header by hand.
+
+After changing anything in `web/`, regenerate the header:
+
+```
+python tools/webassets.py embed
+```
+
+`python tools/webassets.py check` verifies header and sources are in sync
+(CI runs this on every push).
+
+### UI tests
+
 UI automation (render + interaction smoke test):
-- Install once: `cmd /c npm install`
-- Run against local static UI:  
-  `powershell -ExecutionPolicy Bypass -File .\tools\ui-test.ps1 -ServeDocs`
+- Install once: `npm install`
+- Run against the local UI sources (any OS):
+  `python3 -m http.server 8080 --directory web` and in a second shell
+  `UI_URL=http://127.0.0.1:8080 npx playwright test`
+- Windows helper: `powershell -ExecutionPolicy Bypass -File .\tools\ui-test.ps1 -ServeDocs`
 - Run against a live rig UI (recommended for functional checks):  
   `powershell -ExecutionPolicy Bypass -File .\tools\ui-test.ps1 -Url http://scanrig.local`
 - Run only device-backed tests (requires reachable rig backend):  
@@ -159,7 +180,7 @@ What it checks:
 
 Core files:
 - Firmware: `src/main.cpp`
-- Embedded web assets: `src/web_assets.h`
+- Web UI sources: `web/` (embedded via generated `src/web_assets.h`)
 - Web installer template: `deploy/web-installer/index.html`
 - Published installer/OTA artifacts: `docs/`
 
