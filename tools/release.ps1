@@ -104,6 +104,19 @@ $mainCppRaw = [regex]::Replace(
 )
 [System.IO.File]::WriteAllText($mainCpp, $mainCppRaw, (New-Object System.Text.UTF8Encoding($false)))
 
+# Keep the UI cache-buster in sync and regenerate the embedded assets header.
+$webIndexPath = Join-Path $repoRoot "web/index.html"
+$webIndexRaw = Get-Content -Raw $webIndexPath
+$webIndexRaw = [regex]::Replace(
+  $webIndexRaw,
+  '(\./app\.js\?v=)([^"]+)(")',
+  "`${1}$plainVersion`${3}",
+  1
+)
+[System.IO.File]::WriteAllText($webIndexPath, $webIndexRaw, (New-Object System.Text.UTF8Encoding($false)))
+python (Join-Path $repoRoot "tools/webassets.py") embed
+if ($LASTEXITCODE -ne 0) { throw "tools/webassets.py embed failed" }
+
 powershell -ExecutionPolicy Bypass -File $stageScript -EnvName $EnvName -Version $Version -StageRoot $StageRoot
 
 $stageDir = Join-Path $repoRoot (Join-Path $StageRoot $Version)

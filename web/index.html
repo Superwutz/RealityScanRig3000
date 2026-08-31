@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>RealityScanRig3000 - UI</title>
+  <link rel="stylesheet" href="./style.css"/>
+</head>
+<body>
+  <header>
+    <div class="headerInner">
+      <div class="title">
+        <div class="brand">RealityScanRig3000</div>
+        <div class="meta">
+          <span id="connBadge" class="badge">WS: ...</span>
+          <span id="tcpBadge" class="badge">TCP: ...</span>
+          <span id="ipBadge" class="badge">IP: ...</span>
+          <span id="ttBadge" class="badge">TT: ...</span>
+          <span id="phoneBtBadge" class="badge">Phone BT: ...</span>
+        </div>
+      </div>
+      <div class="tabRow">
+        <button id="tabControl" class="tabBtn active">Control</button>
+        <button id="tabSettings" class="tabBtn">Settings</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="cardHead">
+        <h2>Rig Status</h2>
+        <div class="statusRight">
+          <div class="pill" id="shotsPill">Shots: -</div>
+          <div class="pill" id="seqTimePill">Time: ?</div>
+          <button class="pillBtn" id="btnTriggerToggle" title="Dry-run: turntable without camera trigger">Trigger: ON</button>
+          <div class="pill" id="statePill">STATE: ???</div>
+        </div>
+      </div>
+
+      <div class="grid" id="statusGrid"></div>
+
+      <div class="actionRow" id="actionRow">
+        <span class="actionDot"></span>
+        <div class="actionText" id="actionText">Idle</div>
+      </div>
+      <div id="startWarn" class="warnBanner hidden">Turntable not connected. Connect TT before starting a scan.</div>
+
+      <div class="row">
+        <button id="btnStart">START</button>
+        <button id="btnPause">PAUSE</button>
+        <button id="btnAbort" class="danger">ABORT</button>
+        <div class="manualControls" id="manualControls">
+          <span class="manualInlineLabel">Manual Control</span>
+          <button id="btnTtUp" title="Start continuous tilt up">&#9650;</button>
+          <button id="btnTtTiltZero" title="Move tilt axis to zero">0</button>
+          <button id="btnTtDown" title="Start continuous tilt down">&#9660;</button>
+          <button id="btnTtLeft" title="Start continuous left rotation">&#9664;</button>
+          <button id="btnTtRotZero" title="Move rotation axis to zero">0</button>
+          <button id="btnTtRight" title="Start continuous right rotation">&#9654;</button>
+          <button id="btnSnap" title="Trigger camera manually">SNAP</button>
+          <button id="btnTtStop" title="Stop turntable motion">PAUSE</button>
+          <div class="manualLockOverlay" id="manualLockOverlay">Locked while scan is running</div>
+        </div>
+      </div>
+      <div class="manualMeta">
+        <div class="manualLegend">
+          <span class="manualMetaLabel">Legend</span>
+          <span class="legendItem"><span class="legendDot legendBlink"></span>running</span>
+          <span class="legendItem"><span class="legendDot legendDone"></span>done</span>
+          <span class="legendItem"><span class="legendDot legendTodo"></span>open</span>
+          <span class="legendItem"><span class="legendDot legendErr"></span>error</span>
+          <span class="legendItem"><span class="legendDot legendWarn"></span>warn</span>
+          <span class="legendItem"><span class="legendDot legendFlash"></span>flash guard</span>
+        </div>
+        <div class="manualLastAction" id="manualLastAction">Last Manual Action: -</div>
+      </div>
+      <div class="triggerRow">
+        <span class="manualMetaLabel">Camera Trigger</span>
+        <select id="triggerModeSelect" title="Select camera trigger backend">
+          <option value="HARDWARE">Hardware (GPIO)</option>
+          <option value="SMARTPHONE">Smartphone (Bluetooth)</option>
+        </select>
+        <button id="btnAutofocusToggle" title="Toggle hardware autofocus mode">AF: AUTO</button>
+        <button id="btnFlashGuardToggle" title="Insert a long cooldown every N shots (hardware trigger only)">Flash Guard: ON</button>
+        <input id="inpFlashGuardEvery" class="compactInput" type="number" min="1" step="1" placeholder="Every shots" title="Shots until long cooldown" />
+        <button id="btnSetFlashGuardEvery" title="Set shots until long cooldown">Set N</button>
+        <input id="inpFlashGuardMs" class="compactInput" type="number" min="1" step="1" placeholder="Cooldown s" title="Long cooldown duration in seconds" />
+        <button id="btnSetFlashGuardMs" title="Set long cooldown duration in seconds">Set s</button>
+        <button id="btnPhonePairToggle" title="Start or stop Bluetooth pairing mode">Pair Start</button>
+        <button id="btnPhoneDisconnect" title="Disconnect currently connected smartphone">Disconnect</button>
+        <span id="phoneConnectInfo" class="phoneConnectInfo">Status: -</span>
+      </div>
+
+      <div class="ttViz">
+        <div class="vizCard">
+          <div class="vizTitle">Top View (Rotation)</div>
+          <svg id="rotViz" viewBox="0 0 120 120" class="vizSvg" aria-hidden="true">
+            <circle cx="60" cy="60" r="44" class="vizTrack"></circle>
+            <line x1="60" y1="60" x2="60" y2="16" class="vizNeedle" id="rotNeedle"></line>
+            <circle cx="60" cy="60" r="2.5" class="vizHub"></circle>
+          </svg>
+          <div class="vizMeta" id="rotMeta">-</div>
+        </div>
+
+        <div class="vizCard">
+          <div class="vizTitle">Side View (Tilt)</div>
+          <svg id="tiltViz" viewBox="0 0 160 120" class="vizSvg" aria-hidden="true">
+            <path id="tiltTrack" class="vizTrack" d="M20,100 A60,60 0 0 1 140,100" />
+            <line x1="80" y1="100" x2="80" y2="45" class="vizNeedle" id="tiltNeedle"></line>
+            <circle cx="80" cy="100" r="2.5" class="vizHub"></circle>
+          </svg>
+          <div class="vizMeta" id="tiltMeta">-</div>
+        </div>
+      </div>
+
+      <div class="progressWrap">
+        <div class="progressLabel">
+          <span>Progress</span>
+          <span id="progressText">-</span>
+        </div>
+        <div id="seqSegments" class="seqSegments" aria-hidden="true"></div>
+      </div>
+
+      
+
+    </section>
+
+    
+    <section class="card">
+      <div class="cardHead">
+        <h2>Presets</h2>
+        <div class="hint">Choose a preset and apply it to the rig.</div>
+      </div>
+
+      <div class="presetGrid">
+        <button class="presetCard" id="presetSmall">
+          <div class="presetTop">
+            <div class="presetTitle">Quick</div>
+            <div class="presetBadges">
+              <span class="presetBadge" id="presetSmallActive"></span>
+            </div>
+          </div>
+          <div class="presetRows">
+            <div class="presetRow"><span class="presetLabel">Rot Steps</span><span class="presetValue" id="presetSmallRotSteps">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Tilt Steps</span><span class="presetValue" id="presetSmallTiltSteps">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Rot Step (deg)</span><span class="presetValue" id="presetSmallDeg">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Shots</span><span class="presetValue" id="presetSmallShots">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Est Time</span><span class="presetValue" id="presetSmallTime">?</span></div>
+          </div>
+        </button>
+
+        <button class="presetCard" id="presetMedium">
+          <div class="presetTop">
+            <div class="presetTitle">Medium</div>
+            <div class="presetBadges">
+              <span class="presetBadge" id="presetMediumActive"></span>
+            </div>
+          </div>
+          <div class="presetRows">
+            <div class="presetRow"><span class="presetLabel">Rot Steps</span><span class="presetValue" id="presetMediumRotSteps">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Tilt Steps</span><span class="presetValue" id="presetMediumTiltSteps">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Rot Step (deg)</span><span class="presetValue" id="presetMediumDeg">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Shots</span><span class="presetValue" id="presetMediumShots">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Est Time</span><span class="presetValue" id="presetMediumTime">?</span></div>
+          </div>
+        </button>
+
+        <button class="presetCard" id="presetLarge">
+          <div class="presetTop">
+            <div class="presetTitle">Detailed</div>
+            <div class="presetBadges">
+              <span class="presetBadge" id="presetLargeActive"></span>
+            </div>
+          </div>
+          <div class="presetRows">
+            <div class="presetRow"><span class="presetLabel">Rot Steps</span><span class="presetValue" id="presetLargeRotSteps">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Tilt Steps</span><span class="presetValue" id="presetLargeTiltSteps">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Rot Step (deg)</span><span class="presetValue" id="presetLargeDeg">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Shots</span><span class="presetValue" id="presetLargeShots">?</span></div>
+            <div class="presetRow"><span class="presetLabel">Est Time</span><span class="presetValue" id="presetLargeTime">?</span></div>
+          </div>
+        </button>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <div class="hint" id="presetExplain">Select a preset, then press <b>Apply</b>.</div>
+        <button class="pillBtn" id="btnAutoApplyToggle" title="Automatically apply a preset when you click it">Auto-Apply: ON</button>
+        <button id="btnApplyPreset">Apply Preset</button>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        <span class="legendBox sel"></span> Selected (next) &nbsp;&nbsp;
+        <span class="legendBox act"></span> Active (on rig)
+      </div>
+    </section>
+
+<section class="card">
+      <details class="panelFold" id="paramPanel">
+        <summary class="panelHead">
+          <div class="panelTitle">Parameter</div>
+        </summary>
+
+        <div class="panelHint">Sends <code>SET KEY=VALUE</code></div>
+
+        <div class="quickSet">
+          <div class="quickItem">
+            <div class="quickLabel" title="ROT_STEPS">Rot Steps</div>
+            <div class="quickRow">
+              <input id="inpRotSteps" type="number" min="1" step="1" placeholder="-" />
+              <button id="btnSetRotSteps">Set</button>
+            </div>
+          </div>
+
+          <div class="quickItem">
+            <div class="quickLabel" title="TILT_STEPS">Tilt Steps</div>
+            <div class="quickRow">
+              <input id="inpTiltSteps" type="number" min="1" step="1" placeholder="-" />
+              <button id="btnSetTiltSteps">Set</button>
+            </div>
+          </div>
+
+          <div class="quickItem">
+            <div class="quickLabel" title="TILT_FROM">Tilt From (deg)</div>
+            <div class="quickRow">
+              <input id="inpTiltFrom" type="number" step="0.1" placeholder="-" />
+              <button id="btnSetTiltFrom">Set</button>
+            </div>
+          </div>
+
+          <div class="quickItem">
+            <div class="quickLabel" title="TILT_TO">Tilt To (deg)</div>
+            <div class="quickRow">
+              <input id="inpTiltTo" type="number" step="0.1" placeholder="-" />
+              <button id="btnSetTiltTo">Set</button>
+            </div>
+          </div>
+
+          <div class="quickItem">
+            <div class="quickLabel" title="SNAP_SETTLE_MS">Snap Settle (ms)</div>
+            <div class="quickRow">
+              <input id="inpSnapSettle" type="number" min="0" step="50" placeholder="-" />
+              <button id="btnSetSnapSettle">Set</button>
+            </div>
+          </div>
+
+          <div class="quickItem">
+            <div class="quickLabel" title="SNAP_COOLDOWN_MS">Snap Cooldown (ms)</div>
+            <div class="quickRow">
+              <input id="inpSnapCooldown" type="number" min="0" step="50" placeholder="-" />
+              <button id="btnSetSnapCooldown">Set</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="manualBlock">
+          <div class="subHead">Manual Input</div>
+          <div class="row manualRow">
+            <input id="paramKey" placeholder="KEY (e.g. ROT_STEPS)" />
+            <input id="paramVal" placeholder="VALUE (e.g. 72)" />
+            <button id="btnSet">SET</button>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Console</h2>
+        <div class="hint">Runtime logs and status messages</div>
+      </div>
+      <pre id="log"></pre>
+    </section>
+
+    <section class="card settingsSection hidden">
+      <div class="cardHead">
+        <h2>Network</h2>
+        <div class="hint">Configure Wi-Fi and optional static IP without IDE/serial tooling.</div>
+      </div>
+
+      <div class="settingsGrid">
+        <label class="setField">
+          <span>Wi-Fi SSID</span>
+          <input id="setWifiSsid" placeholder="Network name" />
+        </label>
+        <label class="setField">
+          <span>Wi-Fi Password</span>
+          <input id="setWifiPass" type="password" placeholder="Leave empty to keep existing password" />
+        </label>
+      </div>
+
+      <label class="setToggle">
+        <input id="setUseStatic" type="checkbox" />
+        <span>Use static IPv4</span>
+      </label>
+
+      <div id="staticFields" class="settingsGrid hidden">
+        <label class="setField">
+          <span>IP</span>
+          <input id="setIp" placeholder="192.168.1.50" />
+        </label>
+        <label class="setField">
+          <span>Gateway</span>
+          <input id="setGw" placeholder="192.168.1.1" />
+        </label>
+        <label class="setField">
+          <span>DNS</span>
+          <input id="setDns" placeholder="192.168.1.1" />
+        </label>
+        <label class="setField">
+          <span>Mask</span>
+          <input id="setMask" placeholder="255.255.255.0" />
+        </label>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="cardHead">
+        <h2>Status LED</h2>
+        <div class="hint">Onboard RGB LED behavior and brightness.</div>
+      </div>
+
+      <label class="setToggle">
+        <input id="setLedEnable" type="checkbox" />
+        <span>Enable status LED animations</span>
+      </label>
+
+      <label class="setField">
+        <span>Brightness: <strong id="setLedBrightnessVal">28</strong></span>
+        <input id="setLedBrightness" type="range" min="1" max="255" step="1" value="28" />
+      </label>
+
+      <div class="hint saveScopeHint">These buttons apply to all settings above (Network + Status LED).</div>
+      <div class="hint dirtyHint" id="settingsDirtyHint">No unsaved changes.</div>
+      <div class="row">
+        <button id="btnNetReload" class="ghost">Reload All</button>
+        <button id="btnNetSave">Save All</button>
+        <button id="btnNetSaveReboot">Save All & Reboot</button>
+      </div>
+
+      <div id="networkInfo" class="hint"></div>
+      <div id="apModeBanner" class="warnBanner hidden"></div>
+
+      <div class="divider"></div>
+
+      <div class="cardHead">
+        <h2>Misc</h2>
+        <div class="hint">General device behavior settings.</div>
+      </div>
+      <div class="row">
+        <button id="btnTestFocus" class="ghost">Test Focus</button>
+        <button id="btnTestTrigger" class="ghost">Test Trigger</button>
+        <span class="hint">Sends a direct relay pulse for wiring diagnostics.</span>
+      </div>
+
+      <div class="cardHead">
+        <h2>Firmware Update</h2>
+        <div class="hint">OTA update controls and manual firmware upload.</div>
+      </div>
+      <div class="row">
+        <input id="fwFile" type="file" accept=".bin,application/octet-stream" />
+        <button id="btnFwUpload">Upload Firmware (.bin)</button>
+        <span class="hint" id="fwUploadState">Idle</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="manifestUrl" placeholder="Manifest URL (https://.../manifest.json)" />
+        <button id="btnCheckUpdate">Check Updates</button>
+        <button id="btnFwUpdateNow" disabled>Update Now</button>
+        <span class="hint" id="fwVersionInfo">Version: -</span>
+      </div>
+    </section>
+  </main>
+
+  <div id="victoryOverlay" class="victoryOverlay hidden">
+    <div class="victoryCard">
+      <div class="victoryTitle">Scan Complete</div>
+      <div id="victoryText" class="victoryText">Sequence finished successfully.</div>
+      <div class="row">
+        <button id="btnVictoryClose">Close</button>
+        <button id="btnVictoryReset" class="ghost">Reset Sequence</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="appFooter">
+    <div class="appFooterInner" id="appFooterText">(c) 2026 Superwutz / RealityScanRig3000</div>
+  </footer>
+
+  <script src="./app.js?v=0.4.4-settings2"></script>
+</body>
+</html>
