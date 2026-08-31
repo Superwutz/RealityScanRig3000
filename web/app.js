@@ -1153,7 +1153,10 @@ function selectPreset(key){
 }
 
 function sendCmd(line) {
-  if (!ws || ws.readyState !== 1) return;
+  if (!ws || ws.readyState !== 1) {
+    addLog(`[UI] not connected - command dropped: ${line}`);
+    return;
+  }
   ws.send(JSON.stringify({ type: "cmd", line }));
 }
 
@@ -1316,9 +1319,17 @@ function renderStatus() {
     if (k === "FLASH_GUARD_MS" || k === "FLASH_GUARD_REMAIN_MS") {
       rendered = formatFlashGuardSeconds(v);
     }
+    // Values come from the device/turntable; treat them as text, not HTML.
     const div = document.createElement("div");
     div.className = "kv";
-    div.innerHTML = `<div class="k" title="${k}">${labelForKey(k)}</div><div class="v${dim ? " dim" : ""}">${rendered}</div>`;
+    const kEl = document.createElement("div");
+    kEl.className = "k";
+    kEl.title = k;
+    kEl.textContent = labelForKey(k);
+    const vEl = document.createElement("div");
+    vEl.className = "v" + (dim ? " dim" : "");
+    vEl.textContent = rendered;
+    div.append(kEl, vEl);
     statusGrid.appendChild(div);
   };
 
@@ -1779,11 +1790,14 @@ updateAutoApplyToggle();
   gPrevBleConnected = bleNow;
 }
 
+let wsReconnectDelayMs = 800;
+
 function connectWs() {
   const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    wsReconnectDelayMs = 800;
     setBadge(connBadge, "WS: CONNECTED", true);
     addLog(`[UI] WS connected`);
     ws.send(JSON.stringify({ type: "requestStatus" }));
@@ -1797,7 +1811,8 @@ function connectWs() {
     addLog(`[UI] WS disconnected`);
     tcpConnected = false;
     renderStatus();
-    setTimeout(connectWs, 800);
+    setTimeout(connectWs, wsReconnectDelayMs);
+    wsReconnectDelayMs = Math.min(wsReconnectDelayMs * 2, 10000);
   };
 
   ws.onmessage = (ev) => {
