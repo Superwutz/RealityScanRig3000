@@ -41,5 +41,20 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/main.cpp src/web_assets.h web/index.html docs/
           git commit -m "release: ${VERSION}"
+          # main may have moved while the build ran; rebase the release
+          # commit on top and retry. Note: commits that land mid-build are
+          # not part of the built binary.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin main; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "push failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep 5
+          done
           git tag -a "${VERSION}" -m "release: ${VERSION}"
-          git push origin main "${VERSION}"
+          git push origin "${VERSION}"
