@@ -1,0 +1,45 @@
+name: Release (OTA)
+
+# Builds the firmware, stages the OTA/web-installer artifacts in docs/,
+# and pushes a "release: vX.Y.Z" commit plus tag to main. Devices pick the
+# release up via Settings -> Firmware Update (manifest.json on GitHub Pages).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.7.0); must be greater than docs/manifest.json"
+        required: true
+
+concurrency: release
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-release-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+      - run: pip install platformio
+      - name: Build and stage release artifacts
+        run: python tools/release.py --version "${{ github.event.inputs.version }}"
+      - name: Commit, tag and push
+        run: |
+          set -eu
+          VERSION="${{ github.event.inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.cpp src/web_assets.h web/index.html docs/
+          git commit -m "release: ${VERSION}"
+          git tag -a "${VERSION}" -m "release: ${VERSION}"
+          git push origin main "${VERSION}"

@@ -3,6 +3,23 @@
 This repository does not auto-release by default.
 Use the release script to produce a consistent OTA/web-installer release.
 
+## Automated Release (GitHub Actions)
+
+The `Release (OTA)` workflow builds the firmware in CI and publishes the
+OTA artifacts without a local toolchain:
+
+1. GitHub -> Actions -> `Release (OTA)` -> `Run workflow`
+2. Enter the version (e.g. `v0.7.0`; must be greater than `docs/manifest.json`)
+3. The workflow patches versions, builds with PlatformIO, stages `docs/`,
+   and pushes `release: vX.Y.Z` + tag to `main`
+
+GitHub Pages then serves the updated `manifest.json`, and devices see the
+release under `Settings -> Firmware Update -> Check Updates`.
+
+Note: the CI build skips the hardware smoke test from the Go/No-Go gate
+below - use it for changes already validated on a rig, and keep the USB
+web installer as the recovery path.
+
 ## When To Release
 
 Create a release when one of these is true:
