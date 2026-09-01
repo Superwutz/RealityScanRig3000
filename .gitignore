@@ -33,3 +33,4 @@ ui-test-artifacts/
 
 # Local secrets (do not commit)
 src/secrets.local.h
+__pycache__/
