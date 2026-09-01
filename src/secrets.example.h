@@ -34,15 +34,17 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 // Typical relay-board setup:
 // - 2x single-channel relay modules (one for focus, one for shutter)
 // - IN pin driven by ESP32 GPIO
-// - Active level usually LOW on these modules -> keep ACTIVE_LOW = 1
+// - Check your relay board's trigger level: many opto-isolated modules are
+//   active-low (set ACTIVE_LOW to 1), some are active-high (set it to 0).
 //
 // Camera cable mapping used by this project:
 // - white = GND
 // - black = focus
 // - red   = trigger
-// Suggested starter pins (ESP32-S3 DevKitC):
-// - Focus relay IN  -> GPIO16
-// - Trigger relay IN -> GPIO17
+// Defaults below (ESP32-S3 DevKitC, adapt to your wiring):
+// - Focus relay IN   -> GPIO17
+// - Trigger relay IN -> GPIO16
+// - Active-high trigger (ACTIVE_LOW = 0)
 #define SCANRIG_CAM_FOCUS_PIN 17
 #define SCANRIG_CAM_SHUTTER_PIN 16
 #define SCANRIG_CAM_ACTIVE_LOW 0

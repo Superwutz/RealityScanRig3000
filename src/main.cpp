@@ -71,7 +71,7 @@
 #endif
 
 /*
-RealityScanRig3000 ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ ESP32-S3: UI (WebSocket) + BLE Turntable + Sequencer (v1)
+RealityScanRig3000 - ESP32-S3: UI (WebSocket) + BLE Turntable + Sequencer (v1)
 
 Goal:
 - Serve the existing UI 1:1 from the ESP32 (HTML/CSS/JS embedded)
@@ -377,6 +377,11 @@ static String jsonEscape(const String& s) {
     else if (c == '\"') out += "\\\"";
     else if (c == '\n') out += "\\n";
     else if (c == '\r') {}
+    else if ((uint8_t)c < 0x20) {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "\\u%04x", (unsigned)(uint8_t)c);
+      out += buf;
+    }
     else out += c;
   }
   return out;
@@ -709,6 +714,7 @@ static volatile bool gBleDisconnectSeen = false;
 static bool gFwUpdateInProgress = false;
 static bool gFwUpdateOk = false;
 static String gFwUpdateError = "";
+static volatile uint32_t gFwUpdateLastProgressMs = 0;
 static const char* FW_VERSION = SCANRIG_FW_VERSION;
 static const char* UI_VERSION = SCANRIG_UI_VERSION;
 static const char* UPDATE_MANIFEST_URL = SCANRIG_UPDATE_MANIFEST_URL;
@@ -725,6 +731,7 @@ class TTClientCallbacks : public NimBLEClientCallbacks {
 };
 static TTClientCallbacks gTtCbs;
 static NimBLEAddress gLastTTAddr("");
+static bool gHaveLastTTAddr = false;
 
 
 // RX assembly
@@ -734,13 +741,11 @@ static float gLastAngle = 0.0f;
 
 static uint32_t gLastRxMs = 0;          // last time we saw any TT notification
 static uint32_t gLastHeartbeatMs = 0;   // last time we sent a heartbeat query
-static bool gHeartbeatPending = false;  // waiting for a response
 
 static float normAngle360(float a);
 
 static void onNotifyCB(NimBLERemoteCharacteristic*, uint8_t* pData, size_t len, bool) {
   gLastRxMs = millis();
-  gHeartbeatPending = false;
   for (size_t i = 0; i < len; i++) {
     char c = (char)pData[i];
     if (c == '\r') continue;
@@ -822,7 +827,7 @@ static bool bleConnect() {
   bleInitOnce();
 
   NimBLEAddress addr("");
-  if (gLastTTAddr.toString() != "") {
+  if (gHaveLastTTAddr) {
     addr = gLastTTAddr;
   } else {
     if (!findTTAddr(addr)) return false;
@@ -834,8 +839,9 @@ static bool bleConnect() {
   }
 
   if (!gClient->connect(addr)) {
-    if (gLastTTAddr.toString() != "") {
-      gLastTTAddr = NimBLEAddress("");
+    if (gHaveLastTTAddr) {
+      // Cached address may be stale -> rescan once and retry.
+      gHaveLastTTAddr = false;
       NimBLEAddress addr2("");
       if (!findTTAddr(addr2)) return false;
       if (!gClient->connect(addr2)) return false;
@@ -856,10 +862,10 @@ static bool bleConnect() {
   }
 
   gLastTTAddr = addr;
+  gHaveLastTTAddr = true;
   gBleConnected = true;
   gLastRxMs = millis();
   gLastHeartbeatMs = 0;
-  gHeartbeatPending = false;
   Serial.println("[BLE] connected");
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[BLE] connected\"}");
   return true;
@@ -867,6 +873,8 @@ static bool bleConnect() {
 
 // ===== Sequencer (same logic as v1) =====
 enum SeqState : uint8_t { SEQ_IDLE=0, SEQ_RUNNING, SEQ_PAUSED };
+// SUB_ROT_SEEK_WAIT is a retired state; the entry stays so the numeric SUB
+// values reported in the status JSON remain stable.
 enum SeqSub   : uint8_t { SUB_NONE=0, SUB_RECOVER, SUB_RECOVER_WAIT, SUB_ROT_SEEK_WAIT, SUB_TILT_SEND, SUB_TILT_WAIT, SUB_ROT_SEND, SUB_ROT_WAIT, SUB_SETTLE, SUB_SNAP, SUB_COOLDOWN, SUB_DONE, SUB_FLASH_COOLDOWN };
 
 static SeqState gSeqState = SEQ_IDLE;
@@ -896,7 +904,6 @@ static float gStepDeg = 5.0f;
 
 static float gCurTiltTarget = 0.0f;
 static float gRotTargetDeg  = 0.0f;
-static float gRotRowZeroDeg = 0.0f;
 static uint32_t gStateTs = 0;
 static uint32_t gNextPollTs = 0;
 
@@ -929,9 +936,6 @@ static void seqAdvanceAfterShot() {
   }
 }
 static bool gRepeatStep = false;
-static bool gHasResumeAngle = false;
-static float gResumeAngle = 0.0f;
-static uint8_t gSeekAttempts = 0;
 
 static uint32_t gIdleMonitorUntilMs = 0;
 static uint32_t gIdleNextPollMs = 0;
@@ -1022,7 +1026,7 @@ static void ledTick(uint32_t nowMs) {
       return;
     }
 
-    if (gSub == SUB_RECOVER || gSub == SUB_RECOVER_WAIT || gSub == SUB_ROT_SEEK_WAIT) {
+    if (gSub == SUB_RECOVER || gSub == SUB_RECOVER_WAIT) {
       bool alt = ((nowMs / 220) % 2) == 0;
       if (alt) ledWriteRaw(170, 45, 0); else ledWriteRaw(120, 0, 0);
       return;
@@ -1147,7 +1151,6 @@ static void seqResetInternal() {
 
   gCurTiltTarget = tiltAtIndex(0, gTiltSteps, gTiltFrom, gTiltTo);
   gRotTargetDeg = 0.0f;
-  gRotRowZeroDeg = 0.0f;
 
   gStateTs = millis();
   gNextPollTs = 0;
@@ -1159,8 +1162,6 @@ static void seqResetInternal() {
   gRecoverResendNextMs = 0;
   gNeedRecoverOnConnect = false;
   gRepeatStep = false;
-  gHasResumeAngle = false;
-  gSeekAttempts = 0;
   gFlashGuardUntilMs = 0;
   gNeedPhoneRecoverOnConnect = false;
   gSeqTriggerMode = gTriggerMode;
@@ -1193,8 +1194,6 @@ static void seqStart() {
   gRecoverResendNextMs = 0;
   gNeedRecoverOnConnect = false;
   gRepeatStep = false;
-  gHasResumeAngle = false;
-  gSeekAttempts = 0;
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] START\"}");
 }
 static void seqPause() { if (gSeqState == SEQ_RUNNING) { gSeqState = SEQ_PAUSED; wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] PAUSE\"}"); } }
@@ -1227,7 +1226,6 @@ static void seqPauseForBleLoss(bool repeatCurrentStep) {
   gNeedRecoverOnConnect = true;
   gNeedPhoneRecoverOnConnect = false;
   gRepeatStep = repeatCurrentStep;
-  gHasResumeAngle = false;
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] BLE lost -> PAUSE\"}");
 }
 
@@ -1243,7 +1241,6 @@ static void seqPauseForPhoneLoss(bool repeatCurrentStep) {
   gNeedRecoverOnConnect = false;
   gNeedPhoneRecoverOnConnect = true;
   gRepeatStep = repeatCurrentStep;
-  gHasResumeAngle = false;
   wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] PHONE lost -> PAUSE\"}");
 }
 
@@ -1491,44 +1488,10 @@ static void seqTick() {
           if (gDoneSteps > 0) gDoneSteps--;
           gRepeatStep = false;
         }
-        gHasResumeAngle = false;
-        gSeekAttempts = 0;
         gSub = SUB_ROT_SEND;
       }
     } break;
 
-    case SUB_ROT_SEEK_WAIT: {
-      if ((int32_t)(now - gNextPollTs) >= 0) {
-        bleWriteRaw("+QT,CHANGEANGLE;");
-        gNextPollTs = now + gPollMs;
-      }
-      if ((now - gLastRxMs) > 3000) {
-        wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] SEEK no RX -> BLE reconnect\"}");
-        bleDisconnect();
-        gSeqState = SEQ_PAUSED;
-        gResumePending = true;
-        gResumeSub = SUB_RECOVER;
-        return;
-      }
-      if (gAngleUpdated) {
-        gAngleUpdated = false;
-        float dist = angDistDeg(gLastAngle, gRotTargetDeg);
-        if (dist <= gRotTolDeg) {
-          gSub = SUB_ROT_SEND;
-        }
-      }
-      if (now - gStateTs > (gRotTimeoutMs + 8000)) {
-        if (gSeekAttempts >= 2) {
-          wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] SEEK TIMEOUT -> SKIP SEEK\"}");
-          gSeekAttempts = 0;
-          gSub = SUB_ROT_SEND;
-        } else {
-          wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SEQ] SEEK TIMEOUT -> RECOVER\"}");
-          gSub = SUB_RECOVER;
-        }
-        gHasResumeAngle = false;
-      }
-    } break;
 
     case SUB_TILT_SEND: {
       gCurTiltTarget = tiltAtIndex(gTiltIdx, gTiltSteps, gTiltFrom, gTiltTo);
@@ -1762,7 +1725,19 @@ static void wsSendStatus() {
 }
 
 // ===== Command parsing =====
+static bool isStructuralKey(const String& key) {
+  return key == "ROT_STEPS" || key == "TILT_STEPS" ||
+         key == "TILT_FROM" || key == "TILT_TO";
+}
+
 static void setKeyVal(const String& key, const String& val) {
+  // Structural keys reset the whole sequence plan; changing them mid-run
+  // (or mid-pause) would silently abort the scan.
+  if (isStructuralKey(key) && gSeqState != SEQ_IDLE) {
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SEQ] SET ") + jsonEscape(key)
+                    + " blocked (abort or finish the scan first)\"}");
+    return;
+  }
   if (key == "ROT_STEPS") {
     gRotSteps = val.toInt();
     seqResetInternal();
@@ -1776,13 +1751,17 @@ static void setKeyVal(const String& key, const String& val) {
     gTiltTo = val.toFloat();
     seqResetInternal();
   } else if (key == "POLL_MS") {
-    gPollMs = (uint32_t)val.toInt();
+    int v = val.toInt();
+    if (v < 50) v = 50; // below this the angle polling floods the BLE link
+    gPollMs = (uint32_t)v;
   } else if (key == "ROT_TIMEOUT_MS") {
     gRotTimeoutMs = (uint32_t)val.toInt();
   } else if (key == "ROT_TOL_DEG") {
     gRotTolDeg = val.toFloat();
   } else if (key == "TILT_MOVE_MS") {
     gTiltMoveMs = (uint32_t)val.toInt();
+  } else if (key == "TILT_RESERVE_MS") {
+    gTiltReserveMs = (uint32_t)val.toInt();
   } else if (key == "SNAP_SETTLE_MS") {
     gSnapSettleMs = (uint32_t)val.toInt();
   } else if (key == "SNAP_COOLDOWN_MS") {
@@ -2255,8 +2234,6 @@ static void bleAutoConnectTick() {
   bleNoteAttempt(ok);
 }
 
-static void bleHeartbeatTick();
-
 static void bleHeartbeatTick() {
   if (!gClient) return;
 
@@ -2273,7 +2250,6 @@ static void bleHeartbeatTick() {
       gClient->disconnect();
       gBleConnected = false;
       gChr = nullptr;
-      gHeartbeatPending = false;
       return;
     }
 
@@ -2285,13 +2261,10 @@ static void bleHeartbeatTick() {
         gClient->disconnect();
         gBleConnected = false;
         gChr = nullptr;
-        gHeartbeatPending = false;
         return;
       }
-      gHeartbeatPending = true;
     }
   } else {
-    gHeartbeatPending = false;
     gLastRxMs = 0;
   }
 }
@@ -2463,9 +2436,12 @@ void setup() {
     [](AsyncWebServerRequest* req, String filename, size_t index, uint8_t* data, size_t len, bool final) {
       (void)req;
       if (index == 0) {
+        // A previous upload may have been cut off mid-stream; discard it.
+        if (Update.isRunning()) Update.abort();
         gFwUpdateInProgress = true;
         gFwUpdateOk = false;
         gFwUpdateError = "";
+        gFwUpdateLastProgressMs = millis();
         if (gSeqState == SEQ_RUNNING) {
           gFwUpdateError = "cannot update while sequence is running";
           return;
@@ -2480,6 +2456,7 @@ void setup() {
         }
       }
 
+      gFwUpdateLastProgressMs = millis();
       if (gFwUpdateError.length()) return;
       if (len && (Update.write(data, len) != len)) {
         gFwUpdateError = "Update.write failed";
@@ -2515,6 +2492,15 @@ void setup() {
 void loop() {
   // housekeeping for ws
   ws.cleanupClients();
+
+  // Recover from an OTA upload whose client vanished mid-stream.
+  if (gFwUpdateInProgress && !gFwUpdateOk &&
+      (millis() - gFwUpdateLastProgressMs) > 30000) {
+    if (Update.isRunning()) Update.abort();
+    gFwUpdateInProgress = false;
+    gFwUpdateError = "update upload aborted (no data for 30 s)";
+    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[FW] update upload aborted (timeout)\"}");
+  }
 
   // serial
   String cmd = readLineSerial();

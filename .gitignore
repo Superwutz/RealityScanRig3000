@@ -19,7 +19,7 @@
 Thumbs.db
 .DS_Store
 
-# Local extracted UI assets (generated from src/web_assets.h)
+# Scratch copies of UI assets (the tracked sources live in web/)
 /app.js
 /style.css
 /index.html
