@@ -14,6 +14,7 @@ No IDE is required for normal installation and updates.
 - Browser-based control UI hosted by the ESP32
 - Dual-axis sequence engine (rotation + tilt)
 - Preset-driven scan profiles
+- Optional ring pause: the sequence pauses after every tilt move so the camera can be refocused, RESUME starts the ring
 - Live status, progress, and error indicators
 - Manual motion controls
 - OTA update flow from the Settings screen

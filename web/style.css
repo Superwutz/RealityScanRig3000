@@ -416,3 +416,4 @@ code{background:var(--panel2);border:1px solid var(--line);padding:2px 6px;borde
 }
 
 #fwVersionInfo{min-width:200px}
+#btnRingPauseToggle.active{border-color:var(--ok);color:var(--ok)}

@@ -34,6 +34,7 @@ const btnTtRight = el("btnTtRight");
 const btnSnap = el("btnSnap");
 const triggerModeSelect = el("triggerModeSelect");
 const btnAutofocusToggle = el("btnAutofocusToggle");
+const btnRingPauseToggle = el("btnRingPauseToggle");
 const btnFlashGuardToggle = el("btnFlashGuardToggle");
 const inpFlashGuardEvery = el("inpFlashGuardEvery");
 const btnSetFlashGuardEvery = el("btnSetFlashGuardEvery");
@@ -193,6 +194,7 @@ const HIDDEN_STATUS_KEYS = new Set([
   "TRIGGER_MODE", "TRIGGER_ENABLED", "PHONE_BT", "PHONE_PAIRING", "PHONE_NAME", "PHONE_PEER",
   "WIFI_MODE", "HOST",
   "FLASH_GUARD", "FLASH_GUARD_REMAIN_MS", "MANUAL_PREFOCUS_MS", "AF_MODE",
+  "RING_PAUSE",
 ]);
 const LABELS = {
   AF_MODE: "AF Mode",
@@ -1260,6 +1262,11 @@ function updateTriggerBackendUi() {
       ? "Hardware trigger autofocus mode is AUTO"
       : "Hardware trigger autofocus mode is MANUAL";
   }
+  if (btnRingPauseToggle) {
+    const ringPauseOn = ringPauseEnabled();
+    btnRingPauseToggle.textContent = `Ring Pause: ${ringPauseOn ? "ON" : "OFF"}`;
+    btnRingPauseToggle.classList.toggle("active", ringPauseOn);
+  }
   if (btnFlashGuardToggle) {
     btnFlashGuardToggle.textContent = `Flash Guard: ${flashGuardEnabled ? "ON" : "OFF"}`;
     btnFlashGuardToggle.style.display = phoneMode ? "none" : "";
@@ -1732,7 +1739,7 @@ updateAutoApplyToggle();
     "btnStart","btnPause","btnAbort",
     "btnTtUp","btnTtTiltZero","btnTtDown",
     "btnTtLeft","btnTtRotZero","btnTtRight","btnSnap","btnTtStop",
-    "triggerModeSelect","btnAutofocusToggle","btnFlashGuardToggle","btnPhonePairToggle","btnPhoneDisconnect",
+    "triggerModeSelect","btnAutofocusToggle","btnRingPauseToggle","btnFlashGuardToggle","btnPhonePairToggle","btnPhoneDisconnect",
     "btnSet","btnApplyPreset","btnFwUpload",
     "btnSetRotSteps","btnSetTiltSteps",
     "btnSetTiltFrom","btnSetTiltTo",
@@ -1908,6 +1915,18 @@ btnAutofocusToggle && (btnAutofocusToggle.onclick = () => {
   const afAuto = (afMode !== "MANUAL");
   sendCmd(afAuto ? "AF_MODE_MANUAL" : "AF_MODE_AUTO");
   setManualLastAction(`${nowClockText()} autofocus mode ${afAuto ? "manual" : "auto"} requested`);
+});
+
+function ringPauseEnabled() {
+  const raw = String(rigState.RING_PAUSE ?? "0").toLowerCase();
+  return !(raw === "0" || raw === "false");
+}
+
+// Not locked while running: the firmware only looks at it after the next tilt move.
+btnRingPauseToggle && (btnRingPauseToggle.onclick = () => {
+  const on = ringPauseEnabled();
+  sendCmd(on ? "RING_PAUSE_OFF" : "RING_PAUSE_ON");
+  setManualLastAction(`${nowClockText()} ring pause ${on ? "off" : "on"} requested`);
 });
 
 btnFlashGuardToggle && (btnFlashGuardToggle.onclick = () => {

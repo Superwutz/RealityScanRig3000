@@ -266,6 +266,22 @@ static void saveAutoFocusMode(bool enabled) {
   prefs.end();
 }
 
+// Ring pause: the sequence pauses once the tilt has reached a new ring, so the
+// camera can be refocused by hand (the focus distance changes with the tilt).
+static bool gRingPauseEnabled = false;
+
+static void loadRingPause() {
+  prefs.begin("scanrig", true);
+  gRingPauseEnabled = prefs.getBool("ringPause", false);
+  prefs.end();
+}
+
+static void saveRingPause(bool enabled) {
+  prefs.begin("scanrig", false);
+  prefs.putBool("ringPause", enabled);
+  prefs.end();
+}
+
 static void loadStatusLedConfig() {
   prefs.begin("scanrig", true);
   gStatusLedEnabled = prefs.getBool("ledEn", STATUS_LED_ENABLE_DEFAULT);
@@ -1514,6 +1530,17 @@ static void seqTick() {
       if (now - gStateTs >= waitMs) {
         gRotIdx = 0;
         gSub = SUB_ROT_SEND;
+        if (gRingPauseEnabled) {
+          // RESUME continues with the ring's first rotation step.
+          gSeqState = SEQ_PAUSED;
+          gResumePending = true;
+          gResumeSub = SUB_ROT_SEND;
+          char buf[128];
+          snprintf(buf, sizeof(buf),
+                   "[SEQ] RING PAUSE at tilt %d/%d (%.1f deg) - focus, then RESUME",
+                   gTiltIdx + 1, gTiltSteps, gCurTiltTarget);
+          wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}");
+        }
       }
     } break;
 
@@ -1689,6 +1716,7 @@ static String buildRigStateJson() {
   j += "\"AF_POSTFOCUS_MS\":\"" + String(CAM_AF_POSTFOCUS_MS) + "\",";
   j += "\"SNAP_PRESS_MS\":\"" + String(CAM_PRESS_MS) + "\",";
   j += "\"MANUAL_PREFOCUS_MS\":\"" + String(CAM_PREFOCUS_MS) + "\",";
+  j += "\"RING_PAUSE\":\"" + String(gRingPauseEnabled ? 1 : 0) + "\",";
   j += "\"FLASH_GUARD\":\"" + String(gFlashGuardEnabled ? 1 : 0) + "\",";
   j += "\"FLASH_GUARD_EVERY\":\"" + String(gFlashGuardEveryShots) + "\",";
   j += "\"FLASH_GUARD_MS\":\"" + String(gFlashGuardMs) + "\",";
@@ -1808,6 +1836,18 @@ static void setKeyVal(const String& key, const String& val) {
       saveAutoFocusMode(gAutoFocusEnabled);
       wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode -> ")
                       + (gAutoFocusEnabled ? "AUTO" : "MANUAL") + "\"}");
+    }
+  } else if (key == "RING_PAUSE") {
+    // May change mid-run: it only takes effect at the next tilt move.
+    String on = val;
+    on.trim();
+    on.toUpperCase();
+    bool nextEnabled = !(on == "0" || on == "FALSE" || on == "OFF" || on == "NO");
+    if (nextEnabled != gRingPauseEnabled) {
+      gRingPauseEnabled = nextEnabled;
+      saveRingPause(gRingPauseEnabled);
+      wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SEQ] ring pause ")
+                      + (gRingPauseEnabled ? "ENABLED" : "DISABLED") + "\"}");
     }
   } else if (key == "FLASH_GUARD") {
     if (gSeqState == SEQ_RUNNING) {
@@ -1943,6 +1983,14 @@ static void handleLine(const String& lineIn) {
   }
   if (line == "PHONE_DISCONNECT") {
     phoneDisconnect();
+    wsSendStatus();
+    return;
+  }
+  if (line == "RING_PAUSE_ON" || line == "RING_PAUSE_OFF") {
+    gRingPauseEnabled = (line == "RING_PAUSE_ON");
+    saveRingPause(gRingPauseEnabled);
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SEQ] ring pause ")
+                    + (gRingPauseEnabled ? "ENABLED" : "DISABLED") + "\"}");
     wsSendStatus();
     return;
   }
@@ -2111,6 +2159,7 @@ static void printHelpSerial() {
   Serial.println("  SNAP | SNAP_FOCUS | SNAP_TRIGGER");
   Serial.println("  TRIGGER_ON | TRIGGER_OFF");
   Serial.println("  AF_MODE_AUTO | AF_MODE_MANUAL");
+  Serial.println("  RING_PAUSE_ON | RING_PAUSE_OFF");
   Serial.println("  FLASH_GUARD_ON | FLASH_GUARD_OFF");
   Serial.println("  TRIGGER_MODE_HW | TRIGGER_MODE_SMARTPHONE");
   Serial.println("  PHONE_PAIR_START | PHONE_PAIR_STOP | PHONE_DISCONNECT");
@@ -2287,6 +2336,7 @@ void setup() {
 
   loadTriggerMode();
   loadAutoFocusMode();
+  loadRingPause();
   loadStatusLedConfig();
 
   loadWifiCreds();
