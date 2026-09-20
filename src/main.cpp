@@ -38,11 +38,16 @@
 #ifndef SCANRIG_CAM_ACTIVE_LOW
 #define SCANRIG_CAM_ACTIVE_LOW 1
 #endif
+// Manual-focus release: the half-press still has to lead the full press. A
+// Nikon body that gets both contacts at the same instant for 120 ms drops a
+// release now and then (it is still waking the meter / busy writing the
+// last RAW); AF does not start when the body or lens is set to manual focus
+// or AF is on AF-ON only.
 #ifndef SCANRIG_CAM_PRESS_MS
-#define SCANRIG_CAM_PRESS_MS 120
+#define SCANRIG_CAM_PRESS_MS 250
 #endif
 #ifndef SCANRIG_CAM_PREFOCUS_MS
-#define SCANRIG_CAM_PREFOCUS_MS 0
+#define SCANRIG_CAM_PREFOCUS_MS 200
 #endif
 #ifndef SCANRIG_STATUS_LED_ENABLE
 #define SCANRIG_STATUS_LED_ENABLE 1
