@@ -869,10 +869,22 @@ static NimBLEClient* gClient = nullptr;
 static NimBLERemoteCharacteristic* gChr = nullptr;
 static bool gBleConnected = false;
 static volatile bool gBleDisconnectSeen = false;
-static bool gFwUpdateInProgress = false;
-static bool gFwUpdateOk = false;
+// OTA state is written by the async_tcp task (upload callback) and read by
+// loop() (stall watchdog), so the flags are volatile.
+static volatile bool gFwUpdateInProgress = false;
+static volatile bool gFwUpdateOk = false;
 static String gFwUpdateError = "";
 static volatile uint32_t gFwUpdateLastProgressMs = 0;
+// Deferred restart: HTTP handlers run in the async_tcp task, and restarting
+// there drops the response before it is sent. They schedule it instead and
+// loop() restarts once the reply had time to go out.
+static volatile bool gRebootPending = false;
+static volatile uint32_t gRebootAtMs = 0;
+static const uint32_t REBOOT_DELAY_MS = 1000;
+static void scheduleReboot() {
+  gRebootAtMs = millis() + REBOOT_DELAY_MS;
+  gRebootPending = true;
+}
 static const char* FW_VERSION = SCANRIG_FW_VERSION;
 static const char* UI_VERSION = SCANRIG_UI_VERSION;
 static const char* UPDATE_MANIFEST_URL = SCANRIG_UPDATE_MANIFEST_URL;
@@ -2674,10 +2686,7 @@ void setup() {
     wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[NET] ") + jsonEscape(msg) + "\"}");
     wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[NET] saved fields: ") + jsonEscape(savedFieldsJson) + "\"}");
 
-    if (reboot) {
-      delay(250);
-      ESP.restart();
-    }
+    if (reboot) scheduleReboot();
   });
   // Remote-control API: the same text commands the UI sends over the
   // WebSocket, plus status and the event log, over plain HTTP.
@@ -2749,8 +2758,7 @@ void setup() {
       gFwUpdateInProgress = false;
       if (ok) {
         wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[FW] update successful -> reboot\"}");
-        delay(200);
-        ESP.restart();
+        scheduleReboot();
       }
     },
     [](AsyncWebServerRequest* req, String filename, size_t index, uint8_t* data, size_t len, bool final) {
@@ -2758,10 +2766,12 @@ void setup() {
       if (index == 0) {
         // A previous upload may have been cut off mid-stream; discard it.
         if (Update.isRunning()) Update.abort();
-        gFwUpdateInProgress = true;
+        // Fresh timestamp BEFORE the flag: the loop() watchdog must never see
+        // "in progress" together with the previous upload's (or boot's) time.
+        gFwUpdateLastProgressMs = millis();
         gFwUpdateOk = false;
         gFwUpdateError = "";
-        gFwUpdateLastProgressMs = millis();
+        gFwUpdateInProgress = true;
         if (gSeqState == SEQ_RUNNING) {
           gFwUpdateError = "cannot update while sequence is running";
           return;
@@ -2813,13 +2823,23 @@ void loop() {
   // housekeeping for ws
   ws.cleanupClients();
 
-  // Recover from an OTA upload whose client vanished mid-stream.
-  if (gFwUpdateInProgress && !gFwUpdateOk &&
-      (millis() - gFwUpdateLastProgressMs) > 30000) {
-    if (Update.isRunning()) Update.abort();
-    gFwUpdateInProgress = false;
-    gFwUpdateError = "update upload aborted (no data for 30 s)";
-    wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[FW] update upload aborted (timeout)\"}");
+  // Deferred restart requested by an HTTP handler (OTA done, network reboot).
+  if (gRebootPending && (int32_t)(millis() - gRebootAtMs) >= 0) {
+    Serial.println("[SYS] restarting");
+    ESP.restart();
+  }
+
+  // Recover from an OTA upload whose client vanished mid-stream. The upload
+  // callback refreshes the timestamp from another task: read it first, then
+  // compare signed, so a timestamp newer than our millis() is not a stall.
+  if (gFwUpdateInProgress && !gFwUpdateOk) {
+    uint32_t lastProgress = gFwUpdateLastProgressMs;
+    if ((int32_t)(millis() - lastProgress) > 30000) {
+      if (Update.isRunning()) Update.abort();
+      gFwUpdateInProgress = false;
+      gFwUpdateError = "update upload aborted (no data for 30 s)";
+      wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[FW] update upload aborted (timeout)\"}");
+    }
   }
 
   // serial
