@@ -1068,7 +1068,19 @@ static uint32_t gFlashGuardEveryShots = 200;
 static uint32_t gFlashGuardMs = 300000;
 static uint32_t gFlashGuardUntilMs = 0;
 
-static int gTiltIdx = 0;
+// Ring plan: one entry per ring to shoot, holding that ring's tilt position
+// (0-based). Without repeats it is 0..TILT_STEPS-1. RING_REPEAT lists tilt
+// positions (1-based) that get an extra pass right after the first one,
+// e.g. "1" shoots tilt 1 twice in a row; "1,1,3" shoots tilt 1 three times
+// and tilt 3 twice. Runtime-only like the other sequence parameters.
+static const int RING_REPEAT_MAX = 32;            // extra passes in total
+static int gRingRepeat[RING_REPEAT_MAX];          // sorted, 1-based
+static int gRingRepeatCount = 0;
+static const int RING_PLAN_MAX = 256;
+static uint16_t gRingPlan[RING_PLAN_MAX];
+static int gRingCount = 5;
+
+static int gRingIdx = 0;   // index into gRingPlan (ring being shot)
 static int gRotIdx  = 0;
 static float gStepDeg = 5.0f;
 
@@ -1097,8 +1109,8 @@ static void seqAdvanceAfterShot() {
   if (gRotIdx < gRotSteps) {
     gSub = SUB_ROT_SEND;
   } else {
-    gTiltIdx++;
-    if (gTiltIdx < gTiltSteps) {
+    gRingIdx++;
+    if (gRingIdx < gRingCount) {
       gSub = SUB_TILT_SEND;
     } else {
       gSub = SUB_DONE;
@@ -1303,11 +1315,97 @@ static float tiltAtIndex(int idx, int steps, float from, float to) {
   return lerp(from, to, t);
 }
 
+static void buildRingPlan() {
+  // TILT_STEPS may have shrunk since RING_REPEAT was set: drop stale entries.
+  int kept = 0;
+  for (int i = 0; i < gRingRepeatCount; i++) {
+    if (gRingRepeat[i] >= 1 && gRingRepeat[i] <= gTiltSteps) gRingRepeat[kept++] = gRingRepeat[i];
+  }
+  gRingRepeatCount = kept;
+  int n = 0;
+  for (int t = 0; t < gTiltSteps && n < RING_PLAN_MAX; t++) {
+    gRingPlan[n++] = (uint16_t)t;
+    for (int i = 0; i < gRingRepeatCount && n < RING_PLAN_MAX; i++) {
+      if (gRingRepeat[i] == t + 1) gRingPlan[n++] = (uint16_t)t;
+    }
+  }
+  gRingCount = n > 0 ? n : 1;
+  if (n == 0) gRingPlan[0] = 0;
+}
+static int ringTiltPos(int ring) {
+  if (ring < 0) ring = 0;
+  if (ring >= gRingCount) ring = gRingCount - 1;
+  return gRingPlan[ring];
+}
+// Second (or later) pass at the same tilt position as the ring before it.
+static bool ringIsRepeat(int ring) {
+  return ring > 0 && ring < gRingCount && gRingPlan[ring] == gRingPlan[ring - 1];
+}
+static float ringTiltDeg(int ring) {
+  return tiltAtIndex(ringTiltPos(ring), gTiltSteps, gTiltFrom, gTiltTo);
+}
+// Comma-separated list; RING_REPEAT and RING_PLAN in the status are 1-based.
+static String ringRepeatText() {
+  String s;
+  for (int i = 0; i < gRingRepeatCount; i++) {
+    if (i) s += ",";
+    s += String(gRingRepeat[i]);
+  }
+  return s;
+}
+static String ringPlanText() {
+  String s;
+  for (int i = 0; i < gRingCount; i++) {
+    if (i) s += ",";
+    s += String(gRingPlan[i] + 1);
+  }
+  return s;
+}
+// Parses "1,3" / "1 1 3" / "" / "NONE". Returns false (and leaves the current
+// list alone) on a malformed or out-of-range entry; err names the problem.
+static bool parseRingRepeat(const String& valIn, String& err) {
+  String v = valIn;
+  v.trim();
+  String upper = v;
+  upper.toUpperCase();
+  int vals[RING_REPEAT_MAX];
+  int count = 0;
+  if (!(v.length() == 0 || upper == "NONE" || upper == "OFF" || upper == "0" || upper == "DEFAULT")) {
+    int i = 0;
+    while (i < (int)v.length()) {
+      char c = v[i];
+      if (c == ',' || c == ';' || c == ' ' || c == '+') { i++; continue; }
+      if (c < '0' || c > '9') { err = "not a number list: " + v; return false; }
+      int num = 0;
+      while (i < (int)v.length() && v[i] >= '0' && v[i] <= '9') {
+        num = num * 10 + (v[i] - '0');
+        if (num > 10000) num = 10000;
+        i++;
+      }
+      if (num < 1 || num > gTiltSteps) {
+        err = "tilt " + String(num) + " outside 1.." + String(gTiltSteps);
+        return false;
+      }
+      if (count >= RING_REPEAT_MAX) { err = "more than " + String(RING_REPEAT_MAX) + " repeats"; return false; }
+      vals[count++] = num;
+    }
+  }
+  // insertion sort: the plan is built in tilt order anyway
+  for (int a = 1; a < count; a++) {
+    int x = vals[a], b = a - 1;
+    while (b >= 0 && vals[b] > x) { vals[b + 1] = vals[b]; b--; }
+    vals[b + 1] = x;
+  }
+  for (int a = 0; a < count; a++) gRingRepeat[a] = vals[a];
+  gRingRepeatCount = count;
+  return true;
+}
+
 static void seqResetInternal() {
   gSeqState = SEQ_IDLE;
   gSub = SUB_NONE;
 
-  gTiltIdx = 0;
+  gRingIdx = 0;
   gRotIdx = 0;
 
   if (gRotSteps < 1) gRotSteps = 1;
@@ -1316,10 +1414,11 @@ static void seqResetInternal() {
 
   gStepDeg = 360.0f / (float)gRotSteps;
 
-  gTotalSteps = (uint32_t)gRotSteps * (uint32_t)gTiltSteps;
+  buildRingPlan();
+  gTotalSteps = (uint32_t)gRotSteps * (uint32_t)gRingCount;
   gDoneSteps = 0;
 
-  gCurTiltTarget = tiltAtIndex(0, gTiltSteps, gTiltFrom, gTiltTo);
+  gCurTiltTarget = ringTiltDeg(0);
   gRotTargetDeg = 0.0f;
 
   gStateTs = millis();
@@ -1591,14 +1690,14 @@ static void seqTick() {
       // Stop any ongoing motion after power loss / reconnect
       bleWriteRaw("+CT,STOP;");
       bleWriteRaw("+CR,STOP;");
-      gCurTiltTarget = tiltAtIndex(gTiltIdx, gTiltSteps, gTiltFrom, gTiltTo);
+      gCurTiltTarget = ringTiltDeg(gRingIdx);
       String cmd = String("+CR,TILTVALUE=") + String(gCurTiltTarget, 1) + ";";
       bleWriteRaw(cmd);
       {
         char buf[128];
         snprintf(buf, sizeof(buf),
-                 "[SEQ] RECOVER tilt %d/%d -> target=%.1f deg",
-                 gTiltIdx + 1, gTiltSteps, gCurTiltTarget);
+                 "[SEQ] RECOVER tilt %d/%d (ring %d/%d) -> target=%.1f deg",
+                 ringTiltPos(gRingIdx) + 1, gTiltSteps, gRingIdx + 1, gRingCount, gCurTiltTarget);
         String j = String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}";
         wsBroadcastJson(j);
       }
@@ -1664,14 +1763,15 @@ static void seqTick() {
 
 
     case SUB_TILT_SEND: {
-      gCurTiltTarget = tiltAtIndex(gTiltIdx, gTiltSteps, gTiltFrom, gTiltTo);
+      gCurTiltTarget = ringTiltDeg(gRingIdx);
       String cmd = String("+CR,TILTVALUE=") + String(gCurTiltTarget, 1) + ";";
       bleWriteRaw(cmd);
       {
         char buf[128];
         snprintf(buf, sizeof(buf),
-                 "[SEQ] TILT step %d/%d -> target=%.1f deg",
-                 gTiltIdx + 1, gTiltSteps, gCurTiltTarget);
+                 "[SEQ] TILT step %d/%d -> target=%.1f deg (ring %d/%d%s)",
+                 ringTiltPos(gRingIdx) + 1, gTiltSteps, gCurTiltTarget,
+                 gRingIdx + 1, gRingCount, ringIsRepeat(gRingIdx) ? ", repeat" : "");
         String j = String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}";
         wsBroadcastJson(j);
       }
@@ -1680,19 +1780,24 @@ static void seqTick() {
     } break;
 
     case SUB_TILT_WAIT: {
-      uint32_t waitMs = gTiltMoveMs + gTiltReserveMs;
+      // A repeated ring stays at the same tilt: nothing to wait for.
+      bool repeat = ringIsRepeat(gRingIdx);
+      uint32_t waitMs = repeat ? 0 : (gTiltMoveMs + gTiltReserveMs);
       if (now - gStateTs >= waitMs) {
         gRotIdx = 0;
         gSub = SUB_ROT_SEND;
-        if (gRingPauseEnabled) {
+        // A repeated ring always pauses: it exists to refocus (or change
+        // anything else) between two passes at the same tilt.
+        if (gRingPauseEnabled || repeat) {
           // RESUME continues with the ring's first rotation step.
           gSeqState = SEQ_PAUSED;
           gResumePending = true;
           gResumeSub = SUB_ROT_SEND;
-          char buf[128];
+          char buf[160];
           snprintf(buf, sizeof(buf),
-                   "[SEQ] RING PAUSE at tilt %d/%d (%.1f deg) - focus, then RESUME",
-                   gTiltIdx + 1, gTiltSteps, gCurTiltTarget);
+                   "[SEQ] RING PAUSE at tilt %d/%d (%.1f deg), ring %d/%d%s - focus, then RESUME",
+                   ringTiltPos(gRingIdx) + 1, gTiltSteps, gCurTiltTarget,
+                   gRingIdx + 1, gRingCount, repeat ? " (repeat)" : "");
           wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}");
         }
       }
@@ -1712,8 +1817,8 @@ static void seqTick() {
       {
         char buf[160];
         snprintf(buf, sizeof(buf),
-                 "[SEQ] ROT step %d/%d (tilt %d/%d) -> target=%.2f deg (start=%.2f, step=%.2f)",
-                 gRotIdx + 1, gRotSteps, gTiltIdx + 1, gTiltSteps,
+                 "[SEQ] ROT step %d/%d (ring %d/%d, tilt %d/%d) -> target=%.2f deg (start=%.2f, step=%.2f)",
+                 gRotIdx + 1, gRotSteps, gRingIdx + 1, gRingCount, ringTiltPos(gRingIdx) + 1, gTiltSteps,
                  gRotTargetDeg, start, gStepDeg);
         String j = String("{\"type\":\"log\",\"msg\":\"") + jsonEscape(buf) + "\"}";
         wsBroadcastJson(j);
@@ -1849,6 +1954,9 @@ static String buildRigStateJson() {
   j += "\"STEP\":\"" + stepStr + "\",";
   j += "\"ROT_STEPS\":\"" + String(gRotSteps) + "\",";
   j += "\"TILT_STEPS\":\"" + String(gTiltSteps) + "\",";
+  j += "\"RING_REPEAT\":\"" + ringRepeatText() + "\",";
+  j += "\"RING_COUNT\":\"" + String(gRingCount) + "\",";
+  j += "\"RING_PLAN\":\"" + ringPlanText() + "\",";
   j += "\"TILT_FROM\":\"" + String(gTiltFrom, 1) + "\",";
   j += "\"TILT_TO\":\"" + String(gTiltTo, 1) + "\",";
   j += "\"TILT_MOVE_MS\":\"" + String(gTiltMoveMs) + "\",";
@@ -1917,7 +2025,7 @@ static void wsSendStatus() {
 // ===== Command parsing =====
 static bool isStructuralKey(const String& key) {
   return key == "ROT_STEPS" || key == "TILT_STEPS" ||
-         key == "TILT_FROM" || key == "TILT_TO";
+         key == "TILT_FROM" || key == "TILT_TO" || key == "RING_REPEAT";
 }
 
 static bool parseOnOff(const String& valIn) {
@@ -1946,6 +2054,16 @@ static bool setKeyVal(const String& key, const String& val) {
   } else if (key == "TILT_STEPS") {
     gTiltSteps = val.toInt();
     seqResetInternal();
+  } else if (key == "RING_REPEAT") {
+    String err;
+    if (parseRingRepeat(val, err)) {
+      seqResetInternal();
+      String list = ringRepeatText();
+      setLog(String("RING_REPEAT = ") + (list.length() ? list : String("none"))
+             + " -> " + String(gRingCount) + " rings, tilt order " + ringPlanText());
+    } else {
+      setLog("RING_REPEAT rejected: " + err);
+    }
   } else if (key == "TILT_FROM") {
     gTiltFrom = val.toFloat();
     seqResetInternal();

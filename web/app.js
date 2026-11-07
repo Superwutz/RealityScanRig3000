@@ -131,6 +131,8 @@ const inpRotSteps = el("inpRotSteps");
 const inpTiltSteps = el("inpTiltSteps");
 const btnSetRotSteps = el("btnSetRotSteps");
 const btnSetTiltSteps = el("btnSetTiltSteps");
+const inpRingRepeat = el("inpRingRepeat");
+const btnSetRingRepeat = el("btnSetRingRepeat");
 const inpTiltFrom = el("inpTiltFrom");
 const inpTiltTo = el("inpTiltTo");
 const btnSetTiltFrom = el("btnSetTiltFrom");
@@ -158,6 +160,7 @@ const LOCKED_KEYS_WHEN_RUNNING = new Set([
   "TILT_STEPS",
   "TILT_FROM",
   "TILT_TO",
+  "RING_REPEAT",
 ]);
 
 let gVizTiltIdx = null;
@@ -217,6 +220,9 @@ const LABELS = {
   SEQ_EST_TIME: "Seq Est Time",
   ROT_STEPS: "Rot Steps",
   TILT_STEPS: "Tilt Steps",
+  RING_REPEAT: "Repeat Rings",
+  RING_COUNT: "Rings",
+  RING_PLAN: "Ring Plan (tilt)",
   TILT_FROM: "Tilt From (deg)",
   TILT_TO: "Tilt To (deg)",
   ROT_ANGLE: "Rot Angle (deg)",
@@ -623,7 +629,7 @@ function issueSeverityWeight(level) {
 function getCurrentStepContext() {
   const prog = deriveProgressFromStep(rigState.STEP);
   const rotSteps = Number(rigState.ROT_STEPS);
-  const tiltSteps = Number(rigState.TILT_STEPS);
+  const tiltSteps = ringCountFromRig();
   if (!prog || !Number.isFinite(rotSteps) || rotSteps <= 0 || !Number.isFinite(tiltSteps) || tiltSteps <= 0) return null;
   const total = Math.max(1, rotSteps * tiltSteps);
   const active = Math.max(0, Math.min(total - 1, Number(prog.cur) || 0));
@@ -655,7 +661,7 @@ function flashGuardConfig() {
   const enabled = (mode === "HARDWARE") && !(raw === "0" || raw === "false");
   const every = Number(rigState.FLASH_GUARD_EVERY);
   const rotSteps = Number(rigState.ROT_STEPS);
-  const tiltSteps = Number(rigState.TILT_STEPS);
+  const tiltSteps = ringCountFromRig();
   return {
     enabled: enabled && Number.isFinite(every) && every > 0 && Number.isFinite(rotSteps) && rotSteps > 0 && Number.isFinite(tiltSteps) && tiltSteps > 0,
     every: Number.isFinite(every) ? Math.max(1, Math.round(every)) : 0,
@@ -697,6 +703,24 @@ function detectAndMarkIssueFromText(text) {
   if (ml.includes("[wifi]") && /(disconnect|disconnected|fail|lost|timeout)/.test(ml)) {
     markIssueAtCurrentSegment("warn", "wifi event");
   }
+}
+
+// Tilt position (0-based) of every ring the scan shoots, in order. With
+// RING_REPEAT a tilt position appears more than once; older firmware without
+// RING_PLAN shoots one ring per tilt step.
+function ringPlanFromRig(){
+  const raw = String(rigState.RING_PLAN ?? "").trim();
+  if (raw) {
+    const plan = raw.split(",").map(x => Number(x) - 1).filter(n => Number.isFinite(n) && n >= 0);
+    if (plan.length) return plan;
+  }
+  const tiltSteps = Number(rigState.TILT_STEPS);
+  if (!Number.isFinite(tiltSteps) || tiltSteps <= 0) return [];
+  return Array.from({ length: Math.round(tiltSteps) }, (_, i) => i);
+}
+
+function ringCountFromRig(){
+  return ringPlanFromRig().length;
 }
 
 function computeShots(rotSteps, tiltSteps){
@@ -1195,6 +1219,9 @@ function updateTriggerToggle(){
 function populateQuickInputs(){
   if (inpRotSteps && (!inpRotSteps.value)) inpRotSteps.placeholder = rigState.ROT_STEPS || "-";
   if (inpTiltSteps && (!inpTiltSteps.value)) inpTiltSteps.placeholder = rigState.TILT_STEPS || "-";
+  if (inpRingRepeat && (!inpRingRepeat.value)) {
+    inpRingRepeat.placeholder = ("RING_REPEAT" in rigState) ? (rigState.RING_REPEAT || "none") : "-";
+  }
   if (inpTiltFrom && (!inpTiltFrom.value)) inpTiltFrom.placeholder = rigState.TILT_FROM || "-";
   if (inpTiltTo && (!inpTiltTo.value)) inpTiltTo.placeholder = rigState.TILT_TO || "-";
   if (inpSnapSettle && (!inpSnapSettle.value)) inpSnapSettle.placeholder = rigState.SNAP_SETTLE_MS || "-";
@@ -1358,14 +1385,17 @@ function renderStatus() {
   }
 
   const step = deriveProgressFromStep(rigState.STEP);
-  const hasValidVizConfig = Number.isFinite(rotSteps) && rotSteps > 0 && Number.isFinite(tiltSteps) && tiltSteps > 0;
+  const ringPlan = ringPlanFromRig();
+  const ringCount = ringPlan.length;
+  const hasValidVizConfig = Number.isFinite(rotSteps) && rotSteps > 0 && Number.isFinite(tiltSteps) && tiltSteps > 0 && ringCount > 0;
   let rotTargetDeg = null;
   let tiltTargetDeg = null;
   if (hasValidVizConfig) {
     if (step && Number.isFinite(step.cur)) {
-      const completedNow = Math.max(0, Math.min(Number(step.cur) || 0, rotSteps * tiltSteps));
-      const allDoneNow = completedNow >= (rotSteps * tiltSteps);
-      const activeTiltIdxNow = Math.min(Math.max(Math.floor(completedNow / rotSteps), 0), Math.max(tiltSteps - 1, 0));
+      const completedNow = Math.max(0, Math.min(Number(step.cur) || 0, rotSteps * ringCount));
+      const allDoneNow = completedNow >= (rotSteps * ringCount);
+      const activeRingIdxNow = Math.min(Math.max(Math.floor(completedNow / rotSteps), 0), Math.max(ringCount - 1, 0));
+      const activeTiltIdxNow = ringPlan[activeRingIdxNow];
       const rotDoneNow = allDoneNow ? rotSteps : (completedNow % rotSteps);
       const rotIdxNow = Math.min(rotDoneNow, Math.max(rotSteps - 1, 0));
       rotTargetDeg = rotIdxNow * (360 / rotSteps);
@@ -1375,12 +1405,14 @@ function renderStatus() {
     addKV("TILT_TARGET_DEG", Number.isFinite(tiltTargetDeg) ? formatDeg(tiltTargetDeg) : "-", !Number.isFinite(tiltTargetDeg));
   }
   if (step && hasValidVizConfig && rigState.STATE === "RUNNING") {
-    const totalSteps = rotSteps * tiltSteps;
+    const totalSteps = rotSteps * ringCount;
     const completed = Math.max(0, Math.min(Number(step.cur) || 0, totalSteps));
     const allDone = completed >= totalSteps;
     const subNum = Number(rigState.SUB);
-    const tiltDone = allDone ? tiltSteps : Math.floor(completed / rotSteps);
-    const activeTiltIdx = Math.min(Math.max(Math.floor(completed / rotSteps), 0), Math.max(tiltSteps - 1, 0));
+    const activeRingIdx = Math.min(Math.max(Math.floor(completed / rotSteps), 0), Math.max(ringCount - 1, 0));
+    const activeTiltIdx = Math.min(Math.max(ringPlan[activeRingIdx], 0), Math.max(tiltSteps - 1, 0));
+    const ringIsRepeat = activeRingIdx > 0 && ringPlan[activeRingIdx] === ringPlan[activeRingIdx - 1];
+    const tiltDone = allDone ? tiltSteps : activeTiltIdx;
     const tiltIdx = activeTiltIdx;
     const tiltSegCount = Math.max(1, tiltSteps - 1);
     const tiltDoneSegs = Math.max(0, Math.min(tiltSegCount, tiltDone));
@@ -1392,8 +1424,10 @@ function renderStatus() {
 
     // Top view progress (rotation within current tilt)
     const angleLast = Number(rigState.ANGLE_LAST);
-    if (!gVizWasRunning || gVizTiltIdx === null || gVizTiltIdx !== tiltIdx) {
-      gVizTiltIdx = tiltIdx;
+    // gVizTiltIdx tracks the ring (not the tilt position): a repeated ring
+    // starts a fresh rotation at the same tilt.
+    if (!gVizWasRunning || gVizTiltIdx === null || gVizTiltIdx !== activeRingIdx) {
+      gVizTiltIdx = activeRingIdx;
       if (Number.isFinite(angleLast)) {
         const rotStepDegAnchor = 360 / rotSteps;
         let rotDoneAnchor = rotDone;
@@ -1447,7 +1481,10 @@ function renderStatus() {
       const angle = -90 + (tiltFrac * 180);
       tiltNeedle.setAttribute("transform", `rotate(${angle} 80 100)`);
     }
-    if (tiltMeta) tiltMeta.textContent = `Tilt ${tiltIdx + 1}/${tiltSteps} | ${formatDeg(tiltTarget)} deg`;
+    if (tiltMeta) {
+      const ringTxt = (ringCount !== tiltSteps) ? ` | Ring ${activeRingIdx + 1}/${ringCount}${ringIsRepeat ? " (repeat)" : ""}` : "";
+      tiltMeta.textContent = `Tilt ${tiltIdx + 1}/${tiltSteps} | ${formatDeg(tiltTarget)} deg${ringTxt}`;
+    }
     gVizWasRunning = (rigState.STATE === "RUNNING");
   }
   if (hasValidVizConfig && rigState.STATE === "IDLE") {
@@ -1530,8 +1567,9 @@ function renderStatus() {
     }
 
     const parts = computeTimeParts(presetKey);
-    const totalShots = rotSteps * tiltSteps;
-    const baseTotalMs = (tiltSteps * parts.tiltWaitMs) + (totalShots * parts.perShotMs);
+    const ringsTotal = Math.max(1, ringCount);
+    const totalShots = rotSteps * ringsTotal;
+    const baseTotalMs = (ringsTotal * parts.tiltWaitMs) + (totalShots * parts.perShotMs);
     const totalGuardPauses = (parts.flashGuardEnabled && parts.flashGuardEvery > 0 && parts.flashGuardMs > 0 && totalShots > 1)
       ? Math.floor((totalShots - 1) / parts.flashGuardEvery)
       : 0;
@@ -1543,7 +1581,7 @@ function renderStatus() {
       const tiltIdx = Math.floor(nextIdx / rotSteps);
       const subNum = Number(rigState.SUB);
       const inTiltPhase = (subNum === 4 || subNum === 5);
-      const remainingTilts = inTiltPhase ? (tiltSteps - tiltIdx) : Math.max(0, tiltSteps - (tiltIdx + 1));
+      const remainingTilts = inTiltPhase ? (ringsTotal - tiltIdx) : Math.max(0, ringsTotal - (tiltIdx + 1));
       const remainingShots = Math.max(0, step.tot - step.cur);
       const baseRemainingMs = (remainingTilts * parts.tiltWaitMs) + (remainingShots * parts.perShotMs);
       let remainingGuardMs = 0;
@@ -1686,7 +1724,7 @@ function renderStatus() {
     else if (st === "IDLE") actionRow.classList.add("idle");
   }
 
-  const shots = computeShots(rigState.ROT_STEPS, rigState.TILT_STEPS);
+  const shots = computeShots(rigState.ROT_STEPS, ringCountFromRig());
   if (shotsPill) shotsPill.textContent = shots ? `Shots: ${shots.total}` : "Shots: -";
   const prog = deriveProgressFromStep(rigState.STEP);
   const completedNow = !!(gPrevState === "RUNNING" && st === "IDLE" && prog && prog.tot > 0 && prog.cur >= prog.tot);
@@ -1699,7 +1737,7 @@ function renderStatus() {
     if (victoryVisible) hideVictory();
   }
   const rotStepsNum = Number(rigState.ROT_STEPS);
-  const tiltStepsNum = Number(rigState.TILT_STEPS);
+  const tiltStepsNum = ringCountFromRig();  // rings incl. repeats
   const seqTotal = (Number.isFinite(rotStepsNum) && rotStepsNum > 0 && Number.isFinite(tiltStepsNum) && tiltStepsNum > 0)
     ? (rotStepsNum * tiltStepsNum)
     : 0;
@@ -1741,7 +1779,7 @@ updateAutoApplyToggle();
     "btnTtLeft","btnTtRotZero","btnTtRight","btnSnap","btnTtStop",
     "triggerModeSelect","btnAutofocusToggle","btnRingPauseToggle","btnFlashGuardToggle","btnPhonePairToggle","btnPhoneDisconnect",
     "btnSet","btnApplyPreset","btnFwUpload",
-    "btnSetRotSteps","btnSetTiltSteps",
+    "btnSetRotSteps","btnSetTiltSteps","btnSetRingRepeat",
     "btnSetTiltFrom","btnSetTiltTo",
     "btnSetSnapSettle","btnSetSnapCooldown",
     "btnSetFlashGuardEvery","btnSetFlashGuardMs",
@@ -1763,6 +1801,7 @@ updateAutoApplyToggle();
   setLock(btnApplyPreset);
   setLock(btnSetRotSteps);
   setLock(btnSetTiltSteps);
+  setLock(btnSetRingRepeat);
   setLock(btnSetTiltFrom);
   setLock(btnSetTiltTo);
   setLock(btnTtUp);
@@ -1785,6 +1824,7 @@ updateAutoApplyToggle();
   if (manualLockOverlay) manualLockOverlay.title = running ? lockMsg : "";
   if (inpRotSteps) inpRotSteps.title = running ? lockMsg : "";
   if (inpTiltSteps) inpTiltSteps.title = running ? lockMsg : "";
+  if (inpRingRepeat) inpRingRepeat.title = running ? lockMsg : "";
   if (inpTiltFrom) inpTiltFrom.title = running ? lockMsg : "";
   if (inpTiltTo) inpTiltTo.title = running ? lockMsg : "";
   if (inpFlashGuardEvery) inpFlashGuardEvery.disabled = disabled || running;
@@ -2115,6 +2155,15 @@ btnSetTiltSteps && (btnSetTiltSteps.onclick = () => {
   if (!v) return;
   if (!canEditParamKey("TILT_STEPS")) return;
   sendCmd(`SET TILT_STEPS=${v}`);
+  sendCmd("STATUS");
+});
+
+btnSetRingRepeat && (btnSetRingRepeat.onclick = () => {
+  // Empty clears the list (no repeated rings).
+  const v = inpRingRepeat ? inpRingRepeat.value.trim() : "";
+  if (!canEditParamKey("RING_REPEAT")) return;
+  sendCmd(`SET RING_REPEAT=${v || "NONE"}`);
+  if (inpRingRepeat) inpRingRepeat.value = "";
   sendCmd("STATUS");
 });
 

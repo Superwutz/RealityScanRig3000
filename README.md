@@ -15,6 +15,7 @@ No IDE is required for normal installation and updates.
 - Dual-axis sequence engine (rotation + tilt)
 - Preset-driven scan profiles
 - Optional ring pause: the sequence pauses after every tilt move so the camera can be refocused, RESUME starts the ring
+- Repeat rings: shoot a tilt position twice in a row (e.g. once focused on the top of the object, once on its base); the scan pauses before the repeat so you can refocus
 - Live status, progress, and error indicators
 - Manual motion controls
 - HTTP remote-control API for scripts and automation (status, commands, event log)
@@ -172,6 +173,7 @@ value resets to its default on reboot):
 |---|---|---|
 | `ROT_STEPS`, `TILT_STEPS` | Shots per ring, number of rings | only while idle |
 | `TILT_FROM`, `TILT_TO` | Tilt of the first and last ring (degrees) | only while idle |
+| `RING_REPEAT` | Tilt positions (1-based) shot again right after their first ring, e.g. `1` or `1,3`; list a position twice for a third pass; empty or `NONE` = no repeats | only while idle |
 | `TILT_MOVE_MS`, `TILT_RESERVE_MS` | Wait after a tilt move | |
 | `SNAP_SETTLE_MS`, `SNAP_COOLDOWN_MS` | Wait before / after each shot | |
 | `ROT_TOL_DEG`, `ROT_TIMEOUT_MS`, `POLL_MS` | Rotation target tolerance, timeout, angle polling interval | |
@@ -198,6 +200,11 @@ Following a scan:
   `done/total` shots.
 - With ring pause on, the rig stops at every ring with `STATE` = `PAUSED` and
   the log line `[SEQ] RING PAUSE at tilt ...`; send `RESUME` to shoot the ring.
+  A repeated ring always pauses this way (marked `(repeat)`), even with ring
+  pause off.
+- `rigState.RING_COUNT` is the number of rings including repeats, and
+  `rigState.RING_PLAN` the tilt position of each ring in order (e.g.
+  `1,1,2,3,4,5` for `RING_REPEAT=1`).
 - The end of a scan is logged as `[SEQ] DONE`.
 - Poll `/api/log?since=<last logSeq>` to read only new lines. If the response
   says `"truncated": true`, lines were lost (more than 128 since your last
