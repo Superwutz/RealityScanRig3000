@@ -17,6 +17,7 @@ No IDE is required for normal installation and updates.
 - Optional ring pause: the sequence pauses after every tilt move so the camera can be refocused, RESUME starts the ring
 - Live status, progress, and error indicators
 - Manual motion controls
+- HTTP remote-control API for scripts and automation (status, commands, event log)
 - OTA update flow from the Settings screen
 - Web installer for first-time flashing
 
@@ -98,16 +99,19 @@ Recommended relay wiring:
    - Camera `red (TRIGGER)` -> `NO` on trigger relay
    - Leave `NC` unused
 
-Firmware configuration:
-- Set trigger pins in `src/secrets.local.h`:
-  - `SCANRIG_CAM_FOCUS_PIN`
-  - `SCANRIG_CAM_SHUTTER_PIN`
-- Set `SCANRIG_CAM_ACTIVE_LOW` to match your relay board: `1` for the common
-  active-low (low-level-trigger) modules, `0` for active-high boards
-  (see `src/secrets.example.h`).
-- Tune timings if needed:
-  - `SCANRIG_CAM_PREFOCUS_MS`
-  - `SCANRIG_CAM_PRESS_MS`
+Firmware configuration (no rebuild needed: enter these in the UI's parameter
+field or send them through the [Remote Control API](#remote-control-api-http);
+they are saved on the board):
+- Trigger pins: `SET FOCUS_PIN=17`, `SET SHUTTER_PIN=16` (defaults GPIO17/16)
+- Relay logic: `SET CAM_ACTIVE_LOW=1` for the common active-low
+  (low-level-trigger) modules, `0` for active-high boards (default `0`)
+- Timings if needed: `SNAP_PRESS_MS`, `MANUAL_PREFOCUS_MS` (manual focus) and
+  `AF_PREFOCUS_MS`, `AF_SHUTTER_MS`, `AF_POSTFOCUS_MS` (autofocus)
+
+When building yourself, the defaults come from `src/secrets.local.h`
+(`SCANRIG_CAM_FOCUS_PIN`, `SCANRIG_CAM_SHUTTER_PIN`, `SCANRIG_CAM_ACTIVE_LOW`,
+`SCANRIG_CAM_PRESS_MS`, `SCANRIG_CAM_PREFOCUS_MS`, see
+`src/secrets.example.h`); values saved on the board take precedence.
 
 Quick hardware tests (before full scan):
 - `SNAP_FOCUS` -> toggles focus relay only
@@ -127,6 +131,83 @@ Configurable in `src/secrets.local.h`:
 - `SCANRIG_STATUS_LED_ENABLE`
 - `SCANRIG_STATUS_LED_PIN`
 - `SCANRIG_STATUS_LED_BRIGHTNESS`
+
+## Remote Control API (HTTP)
+
+Everything the UI can do is also available over plain HTTP, so a script, a
+home-automation system or an AI agent on your network can run the rig. The
+commands are the same text commands the UI sends over its WebSocket.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/status` | Current state: `rigState` (same fields the UI shows, all values as strings), `logSeq`, `uptimeMs` |
+| `POST /api/cmd` | Run one command, parameter `line`. Returns the log lines it produced (`entries`) and the new `rigState` |
+| `GET /api/log?since=N` | Log events with sequence number greater than `N` (the last 128 are kept in RAM) |
+
+Examples (replace `scanrig.local` with the IP if mDNS does not resolve):
+
+```bash
+curl http://scanrig.local/api/status
+curl -X POST http://scanrig.local/api/cmd --data-urlencode "line=SET ROT_STEPS=48"
+curl -X POST http://scanrig.local/api/cmd --data-urlencode "line=START"
+curl "http://scanrig.local/api/log?since=0"
+```
+
+Commands for `line`:
+- Sequence: `START`, `PAUSE`, `RESUME`, `ABORT`, `RESET`, `STATUS`
+- Parameters: `SET KEY=VALUE`, see the table below. Every key except the
+  Wi-Fi credentials is also a field of `rigState`, so you can read back what
+  is set.
+- Camera: `SNAP`, `SNAP_FOCUS`, `SNAP_TRIGGER`
+- Manual motion: `TT_LEFT`, `TT_RIGHT`, `TT_STOP`, `TT_ROT_ZERO`, `TT_TILT_UP`,
+  `TT_TILT_DOWN`, `TT_TILT_ZERO`
+- Modes: `AF_MODE_AUTO`/`AF_MODE_MANUAL`, `RING_PAUSE_ON`/`RING_PAUSE_OFF`,
+  `FLASH_GUARD_ON`/`FLASH_GUARD_OFF`, `TRIGGER_MODE_HW`/`TRIGGER_MODE_SMARTPHONE`
+- Turntable: `BLE_CONNECT`, `BLE_DISCONNECT`, `RAW <turntable command>`
+
+Parameters for `SET KEY=VALUE` ("saved" = kept across reboots, otherwise the
+value resets to its default on reboot):
+
+| Key | Meaning | Notes |
+|---|---|---|
+| `ROT_STEPS`, `TILT_STEPS` | Shots per ring, number of rings | only while idle |
+| `TILT_FROM`, `TILT_TO` | Tilt of the first and last ring (degrees) | only while idle |
+| `TILT_MOVE_MS`, `TILT_RESERVE_MS` | Wait after a tilt move | |
+| `SNAP_SETTLE_MS`, `SNAP_COOLDOWN_MS` | Wait before / after each shot | |
+| `ROT_TOL_DEG`, `ROT_TIMEOUT_MS`, `POLL_MS` | Rotation target tolerance, timeout, angle polling interval | |
+| `FLASH_GUARD`, `FLASH_GUARD_EVERY`, `FLASH_GUARD_MS` | Flash cooldown pause on/off, every N shots, length | not while running |
+| `RING_PAUSE` | Pause after every tilt move (`1`/`0`) | saved |
+| `AF_MODE` | `AUTO` or `MANUAL` focus | saved, not while running |
+| `TRIGGER_MODE` | `HARDWARE` or `SMARTPHONE` | saved, not while running |
+| `TRIGGER_ENABLED` | `0` = dry run without shutter | |
+| `SNAP_PRESS_MS`, `MANUAL_PREFOCUS_MS` | Manual focus: shutter press length, half-press lead | saved, 0-5000 ms |
+| `AF_PREFOCUS_MS`, `AF_SHUTTER_MS`, `AF_POSTFOCUS_MS` | Autofocus: half-press lead, shutter press, half-press hold after | saved, 0-5000 ms |
+| `FOCUS_PIN`, `SHUTTER_PIN` | Relay GPIOs (`-1` = unused) | saved, only while idle, safe GPIOs only |
+| `CAM_ACTIVE_LOW` | `1` for low-level-trigger relay boards | saved, only while idle |
+| `LED_ENABLE`, `LED_BRIGHTNESS` | Status LED on/off, brightness 1-255 | saved |
+| `WIFI_SSID`, `WIFI_PASS` | Wi-Fi credentials (applied on reboot) | saved |
+
+For the trigger timings, pins and `CAM_ACTIVE_LOW`, the value `DEFAULT`
+(`SET SNAP_PRESS_MS=DEFAULT`) removes the saved value and returns to the
+firmware default. An unknown key is answered with `[SET] unknown key` in the
+log. Static IP settings are set with `POST /api/network` (fields `ssid`,
+`useStatic`, `ip`, `gw`, `dns`, `mask`, `reboot`).
+
+Following a scan:
+- `rigState.STATE` is `IDLE`, `RUNNING` or `PAUSED`; `rigState.STEP` is
+  `done/total` shots.
+- With ring pause on, the rig stops at every ring with `STATE` = `PAUSED` and
+  the log line `[SEQ] RING PAUSE at tilt ...`; send `RESUME` to shoot the ring.
+- The end of a scan is logged as `[SEQ] DONE`.
+- Poll `/api/log?since=<last logSeq>` to read only new lines. If the response
+  says `"truncated": true`, lines were lost (more than 128 since your last
+  poll, or the rig rebooted).
+- Commands sent through the API appear in the UI log as `[API] <command>`.
+
+Security: like the web UI, the API has no password. Only use the rig on a
+network you trust. `POST /api/cmd` refuses requests that a browser sends from a
+different web page (foreign `Origin` header), so other websites cannot control
+the rig through your browser.
 
 ## Privacy and Credentials
 

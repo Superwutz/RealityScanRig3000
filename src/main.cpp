@@ -127,11 +127,13 @@ static const char* FIRM_MASK = SCANRIG_FIRM_MASK;
 static bool   wifiUseStatic = (SCANRIG_FIRM_USE_STATIC != 0);
 static String wifiIpStr, wifiGwStr, wifiDnsStr, wifiMaskStr;
 static const char* SMARTPHONE_BT_NAME = SCANRIG_SMARTPHONE_BT_NAME;
-static const int CAM_FOCUS_PIN = SCANRIG_CAM_FOCUS_PIN;
-static const int CAM_SHUTTER_PIN = SCANRIG_CAM_SHUTTER_PIN;
-static const bool CAM_ACTIVE_LOW = (SCANRIG_CAM_ACTIVE_LOW != 0);
-static const uint32_t CAM_PRESS_MS = SCANRIG_CAM_PRESS_MS;
-static const uint32_t CAM_PREFOCUS_MS = SCANRIG_CAM_PREFOCUS_MS;
+// Camera trigger wiring and timings: compile-time defaults, overridable at
+// runtime (SET ...) and persisted in NVS (see loadCamConfig()).
+static int gCamFocusPin = SCANRIG_CAM_FOCUS_PIN;
+static int gCamShutterPin = SCANRIG_CAM_SHUTTER_PIN;
+static bool gCamActiveLow = (SCANRIG_CAM_ACTIVE_LOW != 0);
+static uint32_t gCamPressMs = SCANRIG_CAM_PRESS_MS;
+static uint32_t gCamPrefocusMs = SCANRIG_CAM_PREFOCUS_MS;
 static const bool STATUS_LED_ENABLE_DEFAULT = (SCANRIG_STATUS_LED_ENABLE != 0);
 static const uint8_t STATUS_LED_PIN = (uint8_t)SCANRIG_STATUS_LED_PIN;
 static const uint8_t STATUS_LED_BRIGHTNESS_DEFAULT = (uint8_t)SCANRIG_STATUS_LED_BRIGHTNESS;
@@ -180,9 +182,9 @@ static void ledBootWifiConnectingTick() {
   uint8_t p = ledPulse8(millis(), 1000, 6, 90);
   ledWriteRaw(0, p, p);
 }
-static const uint32_t CAM_AF_PREFOCUS_MS = SCANRIG_CAM_AF_PREFOCUS_MS;
-static const uint32_t CAM_AF_SHUTTER_MS = SCANRIG_CAM_AF_SHUTTER_MS;
-static const uint32_t CAM_AF_POSTFOCUS_MS = SCANRIG_CAM_AF_POSTFOCUS_MS;
+static uint32_t gCamAfPrefocusMs = SCANRIG_CAM_AF_PREFOCUS_MS;
+static uint32_t gCamAfShutterMs = SCANRIG_CAM_AF_SHUTTER_MS;
+static uint32_t gCamAfPostfocusMs = SCANRIG_CAM_AF_POSTFOCUS_MS;
 
 enum TriggerMode : uint8_t {
   TRIGGER_MODE_HW = 0,
@@ -386,7 +388,65 @@ static void mdnsStart() {
 AsyncWebServer server(HTTP_PORT);
 AsyncWebSocket ws("/"); // UI expects ws://host/ // IMPORTANT: path "/" so the UI's ws://host works
 
+// ===== Event log (HTTP API) =====
+// Every log/rigLine message broadcast over the WebSocket is also kept here
+// with a running sequence number, so HTTP clients (scripts, agents) can poll
+// GET /api/log?since=N instead of holding a WebSocket open. RAM only.
+static const uint32_t EVENT_LOG_CAP = 128;
+struct EventLogEntry {
+  uint32_t seq;
+  uint32_t ms;
+  String json;
+};
+static EventLogEntry gEventLog[EVENT_LOG_CAP];
+static uint32_t gEventSeq = 0;              // seq of the newest entry, 0 = none yet
+static SemaphoreHandle_t gEventMux = nullptr; // created first thing in setup()
+
+static void eventLogLock()   { if (gEventMux) xSemaphoreTake(gEventMux, portMAX_DELAY); }
+static void eventLogUnlock() { if (gEventMux) xSemaphoreGive(gEventMux); }
+
+static void eventLogPush(const String& json) {
+  eventLogLock();
+  gEventSeq++;
+  EventLogEntry& e = gEventLog[(gEventSeq - 1) % EVENT_LOG_CAP];
+  e.seq = gEventSeq;
+  e.ms = millis();
+  e.json = json;
+  eventLogUnlock();
+}
+
+static uint32_t eventLogLastSeq() {
+  eventLogLock();
+  uint32_t s = gEventSeq;
+  eventLogUnlock();
+  return s;
+}
+
+// JSON array of all entries with seq > since. `truncated` is set when entries
+// the caller has not seen were already overwritten (or `since` is from before
+// a reboot); `last` receives the newest seq.
+static String eventLogJsonSince(uint32_t since, bool& truncated, uint32_t& last) {
+  String out = "[";
+  eventLogLock();
+  last = gEventSeq;
+  uint32_t oldest = (gEventSeq > EVENT_LOG_CAP) ? gEventSeq - EVENT_LOG_CAP + 1 : 1;
+  truncated = false;
+  if (since > gEventSeq) { since = 0; truncated = true; }
+  if (since + 1 < oldest) { since = oldest - 1; truncated = true; }
+  bool first = true;
+  for (uint32_t s = since + 1; s <= gEventSeq; s++) {
+    const EventLogEntry& e = gEventLog[(s - 1) % EVENT_LOG_CAP];
+    if (!first) out += ",";
+    first = false;
+    out += "{\"seq\":" + String(e.seq) + ",\"ms\":" + String(e.ms) + ",\"event\":" + e.json + "}";
+  }
+  eventLogUnlock();
+  out += "]";
+  return out;
+}
+
 static void wsBroadcastJson(const String& json) {
+  eventLogPush(json);
   ws.textAll(json);
 }
 static String jsonEscape(const String& s) {
@@ -406,6 +466,19 @@ static String jsonEscape(const String& s) {
     else out += c;
   }
   return out;
+}
+
+// Browsers send an Origin header on cross-site requests; scripts (curl,
+// Python) usually do not. Refusing a foreign Origin keeps arbitrary web pages
+// from driving the rig through the visitor's browser.
+static bool apiCrossOriginBlocked(AsyncWebServerRequest* req) {
+  if (!req->hasHeader("Origin")) return false;
+  auto* h = req->getHeader("Origin");
+  if (!h) return false;
+  String origin = h->value();
+  int p = origin.indexOf("://");
+  if (p >= 0) origin = origin.substring(p + 3);
+  return !origin.equalsIgnoreCase(req->host());
 }
 
 static String getPostParam(AsyncWebServerRequest* req, const char* key, const String& def = "") {
@@ -485,8 +558,72 @@ static bool validateStaticConfig(const String& ip, const String& gw, const Strin
   return true;
 }
 
-static inline uint8_t camIdleLevel() { return CAM_ACTIVE_LOW ? HIGH : LOW; }
-static inline uint8_t camActiveLevel() { return CAM_ACTIVE_LOW ? LOW : HIGH; }
+static inline uint8_t camIdleLevel() { return gCamActiveLow ? HIGH : LOW; }
+static inline uint8_t camActiveLevel() { return gCamActiveLow ? LOW : HIGH; }
+
+// ===== Camera trigger config (runtime + NVS) =====
+// Each value starts at its compile-time default; SET <KEY>=<value> changes it
+// and stores it in NVS, SET <KEY>=DEFAULT removes the stored value again.
+struct CamTimingParam {
+  const char* key;     // SET key and rigState field
+  const char* nvsKey;  // max 15 chars
+  uint32_t* value;
+  uint32_t def;
+  uint32_t minMs;
+  uint32_t maxMs;
+};
+static CamTimingParam CAM_TIMINGS[] = {
+  {"SNAP_PRESS_MS",      "tPress",  &gCamPressMs,       SCANRIG_CAM_PRESS_MS,        20, 5000},
+  {"MANUAL_PREFOCUS_MS", "tPrefoc", &gCamPrefocusMs,    SCANRIG_CAM_PREFOCUS_MS,      0, 5000},
+  {"AF_PREFOCUS_MS",     "tAfPre",  &gCamAfPrefocusMs,  SCANRIG_CAM_AF_PREFOCUS_MS,   0, 5000},
+  {"AF_SHUTTER_MS",      "tAfShut", &gCamAfShutterMs,   SCANRIG_CAM_AF_SHUTTER_MS,   20, 5000},
+  {"AF_POSTFOCUS_MS",    "tAfPost", &gCamAfPostfocusMs, SCANRIG_CAM_AF_POSTFOCUS_MS,  0, 5000},
+};
+
+static void loadCamConfig() {
+  prefs.begin("scanrig", true);
+  for (auto& p : CAM_TIMINGS) {
+    uint32_t v = prefs.getUInt(p.nvsKey, p.def);
+    *p.value = (v < p.minMs || v > p.maxMs) ? p.def : v;
+  }
+  gCamFocusPin = prefs.getInt("pinFocus", SCANRIG_CAM_FOCUS_PIN);
+  gCamShutterPin = prefs.getInt("pinShutter", SCANRIG_CAM_SHUTTER_PIN);
+  gCamActiveLow = prefs.getBool("camActLow", SCANRIG_CAM_ACTIVE_LOW != 0);
+  prefs.end();
+}
+
+static void nvsRemoveKey(const char* nvsKey) {
+  prefs.begin("scanrig", false);
+  prefs.remove(nvsKey);
+  prefs.end();
+}
+
+// GPIOs a relay may use on the ESP32-S3: excludes strapping pins (0, 3, 45,
+// 46), USB (19, 20), UART0 (43, 44), flash/PSRAM (26-37), non-existent
+// 22-25 and the status LED. -1 disables the output.
+static bool camPinAllowed(int pin) {
+  if (pin == -1) return true;
+  if (pin == (int)STATUS_LED_PIN) return false;
+  if (pin == 1 || pin == 2 || (pin >= 4 && pin <= 18) || pin == 21) return true;
+  if ((pin >= 38 && pin <= 42) || pin == 47 || pin == 48) return true;
+  return false;
+}
+
+// Drive the configured trigger outputs to idle; release pins no longer used.
+static void camApplyPins(int oldFocus, int oldShutter) {
+  if (oldFocus >= 0 && oldFocus != gCamFocusPin && oldFocus != gCamShutterPin) pinMode(oldFocus, INPUT);
+  if (oldShutter >= 0 && oldShutter != gCamFocusPin && oldShutter != gCamShutterPin) pinMode(oldShutter, INPUT);
+  if (gCamFocusPin >= 0) {
+    digitalWrite(gCamFocusPin, camIdleLevel());
+    pinMode(gCamFocusPin, OUTPUT);
+    digitalWrite(gCamFocusPin, camIdleLevel());
+  }
+  if (gCamShutterPin >= 0) {
+    digitalWrite(gCamShutterPin, camIdleLevel());
+    pinMode(gCamShutterPin, OUTPUT);
+    digitalWrite(gCamShutterPin, camIdleLevel());
+  }
+}
 
 class PhoneHidServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* s, ble_gap_conn_desc* desc) override {
@@ -536,38 +673,38 @@ static bool triggerCameraHardware() {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] skipped (dry-run enabled)\"}");
     return true;
   }
-  if (CAM_SHUTTER_PIN < 0) {
+  if (gCamShutterPin < 0) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] hardware trigger disabled (no shutter pin)\"}");
     return false;
   }
 
   if (gAutoFocusEnabled) {
-    if (CAM_FOCUS_PIN >= 0) {
+    if (gCamFocusPin >= 0) {
       // Nikon-style sequence for AF shutter release:
       // 1) hold focus, 2) add shutter, 3) release shutter, 4) release focus.
-      digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
-      if (CAM_AF_PREFOCUS_MS > 0) delay(CAM_AF_PREFOCUS_MS);
-      digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
-      delay(CAM_AF_SHUTTER_MS);
-      digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
-      if (CAM_AF_POSTFOCUS_MS > 0) delay(CAM_AF_POSTFOCUS_MS);
-      digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+      digitalWrite(gCamFocusPin, camActiveLevel());
+      if (gCamAfPrefocusMs > 0) delay(gCamAfPrefocusMs);
+      digitalWrite(gCamShutterPin, camActiveLevel());
+      delay(gCamAfShutterMs);
+      digitalWrite(gCamShutterPin, camIdleLevel());
+      if (gCamAfPostfocusMs > 0) delay(gCamAfPostfocusMs);
+      digitalWrite(gCamFocusPin, camIdleLevel());
     } else {
       wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus requested but no focus pin -> shutter only\"}");
-      digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
-      delay(CAM_AF_SHUTTER_MS);
-      digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+      digitalWrite(gCamShutterPin, camActiveLevel());
+      delay(gCamAfShutterMs);
+      digitalWrite(gCamShutterPin, camIdleLevel());
     }
   } else {
-    if (CAM_FOCUS_PIN >= 0) {
-      digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
-      if (CAM_PREFOCUS_MS > 0) delay(CAM_PREFOCUS_MS);
+    if (gCamFocusPin >= 0) {
+      digitalWrite(gCamFocusPin, camActiveLevel());
+      if (gCamPrefocusMs > 0) delay(gCamPrefocusMs);
     }
-    digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
-    delay(CAM_PRESS_MS);
-    digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
-    if (CAM_FOCUS_PIN >= 0) {
-      digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+    digitalWrite(gCamShutterPin, camActiveLevel());
+    delay(gCamPressMs);
+    digitalWrite(gCamShutterPin, camIdleLevel());
+    if (gCamFocusPin >= 0) {
+      digitalWrite(gCamFocusPin, camIdleLevel());
     }
   }
   return true;
@@ -578,13 +715,13 @@ static bool triggerCameraHardwareFocusOnly() {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] focus skipped (dry-run enabled)\"}");
     return true;
   }
-  if (CAM_FOCUS_PIN < 0) {
+  if (gCamFocusPin < 0) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] focus trigger disabled (no focus pin)\"}");
     return false;
   }
-  digitalWrite(CAM_FOCUS_PIN, camActiveLevel());
-  delay(CAM_PRESS_MS);
-  digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
+  digitalWrite(gCamFocusPin, camActiveLevel());
+  delay(gCamPressMs);
+  digitalWrite(gCamFocusPin, camIdleLevel());
   return true;
 }
 
@@ -593,13 +730,13 @@ static bool triggerCameraHardwareShutterOnly() {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger skipped (dry-run enabled)\"}");
     return true;
   }
-  if (CAM_SHUTTER_PIN < 0) {
+  if (gCamShutterPin < 0) {
     wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] shutter trigger disabled (no shutter pin)\"}");
     return false;
   }
-  digitalWrite(CAM_SHUTTER_PIN, camActiveLevel());
-  delay(CAM_PRESS_MS);
-  digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
+  digitalWrite(gCamShutterPin, camActiveLevel());
+  delay(gCamPressMs);
+  digitalWrite(gCamShutterPin, camIdleLevel());
   return true;
 }
 
@@ -1716,11 +1853,19 @@ static String buildRigStateJson() {
   j += "\"TRIGGER_MODE\":\"" + String(gTriggerMode == TRIGGER_MODE_SMARTPHONE ? "SMARTPHONE" : "HARDWARE") + "\",";
   j += "\"TRIGGER_ENABLED\":\"" + String(gTriggerEnabled ? 1 : 0) + "\",";
   j += "\"AF_MODE\":\"" + String(gAutoFocusEnabled ? "AUTO" : "MANUAL") + "\",";
-  j += "\"AF_PREFOCUS_MS\":\"" + String(CAM_AF_PREFOCUS_MS) + "\",";
-  j += "\"AF_SHUTTER_MS\":\"" + String(CAM_AF_SHUTTER_MS) + "\",";
-  j += "\"AF_POSTFOCUS_MS\":\"" + String(CAM_AF_POSTFOCUS_MS) + "\",";
-  j += "\"SNAP_PRESS_MS\":\"" + String(CAM_PRESS_MS) + "\",";
-  j += "\"MANUAL_PREFOCUS_MS\":\"" + String(CAM_PREFOCUS_MS) + "\",";
+  j += "\"AF_PREFOCUS_MS\":\"" + String(gCamAfPrefocusMs) + "\",";
+  j += "\"AF_SHUTTER_MS\":\"" + String(gCamAfShutterMs) + "\",";
+  j += "\"AF_POSTFOCUS_MS\":\"" + String(gCamAfPostfocusMs) + "\",";
+  j += "\"SNAP_PRESS_MS\":\"" + String(gCamPressMs) + "\",";
+  j += "\"MANUAL_PREFOCUS_MS\":\"" + String(gCamPrefocusMs) + "\",";
+  j += "\"FOCUS_PIN\":\"" + String(gCamFocusPin) + "\",";
+  j += "\"SHUTTER_PIN\":\"" + String(gCamShutterPin) + "\",";
+  j += "\"CAM_ACTIVE_LOW\":\"" + String(gCamActiveLow ? 1 : 0) + "\",";
+  j += "\"POLL_MS\":\"" + String(gPollMs) + "\",";
+  j += "\"ROT_TIMEOUT_MS\":\"" + String(gRotTimeoutMs) + "\",";
+  j += "\"ROT_TOL_DEG\":\"" + String(gRotTolDeg, 2) + "\",";
+  j += "\"LED_ENABLE\":\"" + String(gStatusLedEnabled ? 1 : 0) + "\",";
+  j += "\"LED_BRIGHTNESS\":\"" + String((int)gStatusLedBrightness) + "\",";
   j += "\"RING_PAUSE\":\"" + String(gRingPauseEnabled ? 1 : 0) + "\",";
   j += "\"FLASH_GUARD\":\"" + String(gFlashGuardEnabled ? 1 : 0) + "\",";
   j += "\"FLASH_GUARD_EVERY\":\"" + String(gFlashGuardEveryShots) + "\",";
@@ -1763,13 +1908,25 @@ static bool isStructuralKey(const String& key) {
          key == "TILT_FROM" || key == "TILT_TO";
 }
 
-static void setKeyVal(const String& key, const String& val) {
+static bool parseOnOff(const String& valIn) {
+  String v = valIn;
+  v.trim();
+  v.toUpperCase();
+  return !(v == "0" || v == "FALSE" || v == "OFF" || v == "NO");
+}
+
+static void setLog(const String& msg) {
+  wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SET] ") + jsonEscape(msg) + "\"}");
+}
+
+// Returns false for an unknown key.
+static bool setKeyVal(const String& key, const String& val) {
   // Structural keys reset the whole sequence plan; changing them mid-run
   // (or mid-pause) would silently abort the scan.
   if (isStructuralKey(key) && gSeqState != SEQ_IDLE) {
     wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[SEQ] SET ") + jsonEscape(key)
                     + " blocked (abort or finish the scan first)\"}");
-    return;
+    return true;
   }
   if (key == "ROT_STEPS") {
     gRotSteps = val.toInt();
@@ -1802,7 +1959,7 @@ static void setKeyVal(const String& key, const String& val) {
   } else if (key == "TRIGGER_MODE") {
     if (gSeqState == SEQ_RUNNING) {
       wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] trigger mode change blocked (sequence running)\"}");
-      return;
+      return true;
     }
     String mode = val;
     mode.trim();
@@ -1830,7 +1987,7 @@ static void setKeyVal(const String& key, const String& val) {
   } else if (key == "AF_MODE") {
     if (gSeqState == SEQ_RUNNING) {
       wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] autofocus mode change blocked (sequence running)\"}");
-      return;
+      return true;
     }
     String mode = val;
     mode.trim();
@@ -1857,7 +2014,7 @@ static void setKeyVal(const String& key, const String& val) {
   } else if (key == "FLASH_GUARD") {
     if (gSeqState == SEQ_RUNNING) {
       wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
-      return;
+      return true;
     }
     String on = val;
     on.trim();
@@ -1871,7 +2028,7 @@ static void setKeyVal(const String& key, const String& val) {
   } else if (key == "FLASH_GUARD_EVERY") {
     if (gSeqState == SEQ_RUNNING) {
       wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
-      return;
+      return true;
     }
     uint32_t v = (uint32_t)val.toInt();
     if (v < 1) v = 1;
@@ -1879,7 +2036,7 @@ static void setKeyVal(const String& key, const String& val) {
   } else if (key == "FLASH_GUARD_MS") {
     if (gSeqState == SEQ_RUNNING) {
       wsBroadcastJson("{\"type\":\"log\",\"msg\":\"[SNAP] flash guard change blocked (sequence running)\"}");
-      return;
+      return true;
     }
     uint32_t v = (uint32_t)val.toInt();
     if (v < 1000) v = 1000;
@@ -1890,7 +2047,66 @@ static void setKeyVal(const String& key, const String& val) {
   } else if (key == "WIFI_PASS") {
     wifiPass = val;
     saveWifiCreds(wifiSsid, wifiPass);
+  } else if (key == "LED_ENABLE") {
+    gStatusLedEnabled = parseOnOff(val);
+    saveStatusLedConfig(gStatusLedEnabled, gStatusLedBrightness);
+  } else if (key == "LED_BRIGHTNESS") {
+    int b = val.toInt();
+    if (b < STATUS_LED_BRIGHTNESS_MIN) b = STATUS_LED_BRIGHTNESS_MIN;
+    if (b > STATUS_LED_BRIGHTNESS_MAX) b = STATUS_LED_BRIGHTNESS_MAX;
+    gStatusLedBrightness = (uint8_t)b;
+    saveStatusLedConfig(gStatusLedEnabled, gStatusLedBrightness);
+  } else if (key == "FOCUS_PIN" || key == "SHUTTER_PIN" || key == "CAM_ACTIVE_LOW") {
+    if (gSeqState != SEQ_IDLE) {
+      setLog(String("SET ") + key + " blocked (abort or finish the scan first)");
+      return true;
+    }
+    int oldFocus = gCamFocusPin;
+    int oldShutter = gCamShutterPin;
+    bool toDefault = val.equalsIgnoreCase("DEFAULT");
+    const char* nvsKey = key == "FOCUS_PIN" ? "pinFocus" : (key == "SHUTTER_PIN" ? "pinShutter" : "camActLow");
+    if (key == "CAM_ACTIVE_LOW") {
+      gCamActiveLow = toDefault ? (SCANRIG_CAM_ACTIVE_LOW != 0) : parseOnOff(val);
+    } else {
+      int pin = toDefault ? (key == "FOCUS_PIN" ? SCANRIG_CAM_FOCUS_PIN : SCANRIG_CAM_SHUTTER_PIN) : val.toInt();
+      if (!toDefault && !camPinAllowed(pin)) {
+        setLog(String("SET ") + key + " rejected: GPIO " + val + " is not usable for a relay");
+        return true;
+      }
+      if (key == "FOCUS_PIN") gCamFocusPin = pin; else gCamShutterPin = pin;
+    }
+    if (toDefault) {
+      nvsRemoveKey(nvsKey);
+    } else {
+      prefs.begin("scanrig", false);
+      if (key == "CAM_ACTIVE_LOW") prefs.putBool(nvsKey, gCamActiveLow);
+      else prefs.putInt(nvsKey, key == "FOCUS_PIN" ? gCamFocusPin : gCamShutterPin);
+      prefs.end();
+    }
+    camApplyPins(oldFocus, oldShutter);
+    setLog(String("trigger wiring: focus GPIO ") + gCamFocusPin + ", shutter GPIO " + gCamShutterPin
+           + (gCamActiveLow ? ", active-low" : ", active-high"));
+  } else {
+    for (auto& p : CAM_TIMINGS) {
+      if (key != p.key) continue;
+      if (val.equalsIgnoreCase("DEFAULT")) {
+        *p.value = p.def;
+        nvsRemoveKey(p.nvsKey);
+      } else {
+        long v = val.toInt();
+        if (v < (long)p.minMs) v = p.minMs;
+        if (v > (long)p.maxMs) v = p.maxMs;
+        *p.value = (uint32_t)v;
+        prefs.begin("scanrig", false);
+        prefs.putUInt(p.nvsKey, *p.value);
+        prefs.end();
+      }
+      setLog(String(p.key) + " = " + *p.value + " ms");
+      return true;
+    }
+    return false;
   }
+  return true;
 }
 
 static void handleLine(const String& lineIn) {
@@ -2063,9 +2279,9 @@ static void handleLine(const String& lineIn) {
     rest.trim();
     int eq = rest.indexOf('=');
     if (eq > 0) {
-      String key = rest.substring(0, eq); key.trim();
+      String key = rest.substring(0, eq); key.trim(); key.toUpperCase();
       String val = rest.substring(eq + 1); val.trim();
-      setKeyVal(key, val);
+      if (!setKeyVal(key, val)) setLog(String("unknown key: ") + key);
       wsSendStatus();
       return;
     }
@@ -2326,18 +2542,13 @@ static void bleHeartbeatTick() {
 // ===== Setup =====
 
 void setup() {
+  gEventMux = xSemaphoreCreateMutex();
   Serial.begin(115200);
   delay(200);
   ledWriteRaw(0, 0, 0);
 
-  if (CAM_FOCUS_PIN >= 0) {
-    pinMode(CAM_FOCUS_PIN, OUTPUT);
-    digitalWrite(CAM_FOCUS_PIN, camIdleLevel());
-  }
-  if (CAM_SHUTTER_PIN >= 0) {
-    pinMode(CAM_SHUTTER_PIN, OUTPUT);
-    digitalWrite(CAM_SHUTTER_PIN, camIdleLevel());
-  }
+  loadCamConfig();
+  camApplyPins(-1, -1);
 
   loadTriggerMode();
   loadAutoFocusMode();
@@ -2467,6 +2678,60 @@ void setup() {
       delay(250);
       ESP.restart();
     }
+  });
+  // Remote-control API: the same text commands the UI sends over the
+  // WebSocket, plus status and the event log, over plain HTTP.
+  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+    String body = "{\"ok\":true,";
+    body += "\"uptimeMs\":" + String((unsigned long)millis()) + ",";
+    body += "\"logSeq\":" + String(eventLogLastSeq()) + ",";
+    body += "\"rigState\":" + buildRigStateJson() + "}";
+    req->send(200, "application/json; charset=utf-8", body);
+  });
+  server.on("/api/log", HTTP_GET, [](AsyncWebServerRequest* req) {
+    uint32_t since = 0;
+    if (req->hasParam("since")) since = (uint32_t)req->getParam("since")->value().toInt();
+    bool truncated = false;
+    uint32_t last = 0;
+    String entries = eventLogJsonSince(since, truncated, last);
+    String body = "{\"ok\":true,";
+    body += "\"uptimeMs\":" + String((unsigned long)millis()) + ",";
+    body += "\"logSeq\":" + String(last) + ",";
+    body += "\"truncated\":" + String(truncated ? "true" : "false") + ",";
+    body += "\"entries\":" + entries + "}";
+    req->send(200, "application/json; charset=utf-8", body);
+  });
+  server.on("/api/cmd", HTTP_POST, [](AsyncWebServerRequest* req) {
+    if (apiCrossOriginBlocked(req)) {
+      req->send(403, "application/json; charset=utf-8",
+                buildApiErrorJson("FORBIDDEN_ORIGIN", "cross-origin requests are not accepted"));
+      return;
+    }
+    String line;
+    if (req->hasParam("line", true)) line = req->getParam("line", true)->value();
+    else if (req->hasParam("line")) line = req->getParam("line")->value();
+    line.trim();
+    if (!line.length()) {
+      req->send(400, "application/json; charset=utf-8",
+                buildApiErrorJson("VALIDATION_ERROR", "parameter 'line' is required"));
+      return;
+    }
+    uint32_t before = eventLogLastSeq();
+    String shown = line;
+    String upper = line;
+    upper.toUpperCase();
+    if (upper.startsWith("SET WIFI_PASS")) shown = "SET WIFI_PASS=***";  // keep secrets out of the log
+    wsBroadcastJson(String("{\"type\":\"log\",\"msg\":\"[API] ") + jsonEscape(shown) + "\"}");
+    handleLine(line);
+    bool truncated = false;
+    uint32_t last = 0;
+    String entries = eventLogJsonSince(before, truncated, last);
+    String body = "{\"ok\":true,";
+    body += "\"line\":\"" + jsonEscape(shown) + "\",";
+    body += "\"logSeq\":" + String(last) + ",";
+    body += "\"entries\":" + entries + ",";
+    body += "\"rigState\":" + buildRigStateJson() + "}";
+    req->send(200, "application/json; charset=utf-8", body);
   });
   server.on("/api/update", HTTP_POST,
     [](AsyncWebServerRequest* req) {

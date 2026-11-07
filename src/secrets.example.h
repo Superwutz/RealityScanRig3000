@@ -45,6 +45,9 @@ Copy this file to `src/secrets.local.h` and fill in real values.
 // - Focus relay IN   -> GPIO17
 // - Trigger relay IN -> GPIO16
 // - Active-high trigger (ACTIVE_LOW = 0)
+// Pins, ACTIVE_LOW and the press timings below are only defaults: they can
+// be changed at runtime (SET FOCUS_PIN=..., SET SNAP_PRESS_MS=..., see
+// README "Remote Control API"), which stores the value in NVS.
 #define SCANRIG_CAM_FOCUS_PIN 17
 #define SCANRIG_CAM_SHUTTER_PIN 16
 #define SCANRIG_CAM_ACTIVE_LOW 0
